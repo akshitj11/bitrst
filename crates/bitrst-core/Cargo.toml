@@ -5,3 +5,7 @@ edition = "2021"
 
 [dependencies]
 bitrst-crypto = { path = "../bitrst-crypto" }
+
+[dev-dependencies]
+hex = "0.4"
+bitrst-crypto = { path = "../bitrst-crypto" }
