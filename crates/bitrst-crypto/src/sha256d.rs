@@ -8,7 +8,7 @@ pub fn sha256d(data: &[u8]) -> [u8; 32] {
     out
 }
 
-#[cfg(test)]  //performing this during cargo test , to actually match with the real sha256 outputs
+#[cfg(test)] //performing this during cargo test , to actually match with the real sha256 outputs
 mod tests {
     use super::sha256d;
 
@@ -28,6 +28,9 @@ mod tests {
         .unwrap(); //took btc genesis blockheader bytes then converted it from hex text to bytes
 
         let hash = sha256d(&header);
-        assert_eq!(to_bitcoin_hex(hash), "f3554f2f2af964264669e106f2367c27fe48e49b767f48ca6f0166d0393dc6f2");
+        assert_eq!(
+            to_bitcoin_hex(hash),
+            "f3554f2f2af964264669e106f2367c27fe48e49b767f48ca6f0166d0393dc6f2"
+        );
     }
 }
