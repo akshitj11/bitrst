@@ -7,6 +7,7 @@ edition = "2021"
 members = [
     "crates/bitrst-core",
     "crates/bitrst-crypto",
+    "crates/bitrst-miner",
 ]
 
 [dependencies]

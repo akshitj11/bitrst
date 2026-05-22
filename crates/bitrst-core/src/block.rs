@@ -1,20 +1,29 @@
+//! Bitcoin block header primitives.
+
 use bitrst_crypto::sha256d::sha256d;
 
+/// A Bitcoin block header in wire-serialization field order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockHeader {
+    /// Block version, serialized as a little-endian signed integer.
     pub version: i32,
+    /// Hash of the previous block header, stored in internal byte order.
     pub prev_blockhash: [u8; 32],
+    /// Merkle root of this block's transactions, stored in internal byte order.
     pub merkle_root: [u8; 32],
+    /// Unix timestamp claimed by the miner.
     pub time: u32,
+    /// Compact target representation used for proof of work.
     pub bits: u32,
+    /// Nonce adjusted by miners while searching for a valid proof of work.
     pub nonce: u32,
 }
 
 impl BlockHeader {
+    /// Serializes the header into Bitcoin's fixed 80-byte wire format.
     pub fn serialize(&self) -> [u8; 80] {
-        //converting our header into 80 byte btc header format
         let mut out = [0u8; 80];
-        out[0..4].copy_from_slice(&self.version.to_le_bytes()); // this is little endian(kinda reading about this more)
+        out[0..4].copy_from_slice(&self.version.to_le_bytes());
         out[4..36].copy_from_slice(&self.prev_blockhash);
         out[36..68].copy_from_slice(&self.merkle_root);
         out[68..72].copy_from_slice(&self.time.to_le_bytes());
@@ -23,12 +32,13 @@ impl BlockHeader {
         out
     }
 
+    /// Returns the SHA-256d hash of this serialized block header.
     pub fn hash(&self) -> [u8; 32] {
         sha256d(&self.serialize())
     }
 }
 
-#[cfg(test)] // builds btc genesis block header > hashes >serializes>matches the output
+#[cfg(test)]
 mod tests {
     use super::BlockHeader;
 

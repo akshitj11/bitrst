@@ -1,0 +1,7 @@
+[package]
+name = "bitrst-miner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitrst-core = { path = "../bitrst-core" }

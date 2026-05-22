@@ -8,12 +8,16 @@ Bitcoin from scratch, in Rust.
 ## Current scope
 
 - Workspace scaffold
-- Core and crypto crates
+- Core, crypto, and miner crates
+- SHA-256d hashing with the Bitcoin genesis header test vector
+- Block header serialization and hashing
+- Transaction and UTXO basics
+- First proof-of-work nonce search pass
 - CI for tests and clippy
 
 ## Roadmap
 
-1. Block + SHA256d
-2. Transactions + UTXO
-3. Proof of work
+1. Block + SHA256d: done
+2. Transactions + UTXO: in progress
+3. Proof of work: in progress
 4. Chain validation
