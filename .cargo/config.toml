@@ -1,0 +1,2 @@
+[alias]
+test = "test --all --features test-short-period"

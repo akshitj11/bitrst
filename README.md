@@ -22,6 +22,14 @@ Bitcoin from scratch, in Rust.
 - Universal-guide chain consensus integration tests (reorg safety, orphans, difficulty, validation, events)
 - CI for tests and clippy
 
+## Testing
+
+```bash
+cargo test --all --features test-short-period
+```
+
+With [`.cargo/config.toml`](.cargo/config.toml) in the repo, plain `cargo test` uses the same flags as CI. A full mainnet-interval boundary run (`cargo test --all` without features) is slower but supported.
+
 ## Roadmap
 
 1. Block + SHA256d: done
