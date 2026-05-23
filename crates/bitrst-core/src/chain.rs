@@ -5,7 +5,7 @@
 //! cumulative proof-of-work, not block height alone.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use thiserror::Error;
 
@@ -36,6 +36,7 @@ impl ChainWork {
             out[index] = sum as u8;
             carry = sum >> 8;
         }
+        debug_assert_eq!(carry, 0, "ChainWork addition overflowed 256 bits");
         Self(out)
     }
 
@@ -160,6 +161,10 @@ pub enum ChainError {
     /// An internal lock was poisoned.
     #[error("chain lock poisoned")]
     LockPoisoned,
+
+    /// Network-adjusted time must be non-zero for future-drift checks.
+    #[error("network time must be greater than zero")]
+    InvalidNetworkTime,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +185,7 @@ struct OrphanEntry {
 #[derive(Debug)]
 pub struct Chain {
     blocks: Vec<Block>,
+    active_hashes: HashSet<[u8; 32]>,
     known: HashMap<[u8; 32], BlockMeta>,
     total_work: ChainWork,
     utxo: UtxoSet,
@@ -193,8 +199,13 @@ pub struct Chain {
 impl Chain {
     /// Creates a new chain with a valid genesis block at height 0.
     pub fn new_genesis(genesis: Block, network_time: u32) -> Result<Self, ChainError> {
+        if network_time == 0 {
+            return Err(ChainError::InvalidNetworkTime);
+        }
+
         let mut chain = Self {
             blocks: Vec::new(),
+            active_hashes: HashSet::new(),
             known: HashMap::new(),
             total_work: ChainWork::default(),
             utxo: UtxoSet::new(),
@@ -222,6 +233,7 @@ impl Chain {
             },
         );
         chain.blocks.push(genesis);
+        chain.active_hashes.insert(hash);
         chain.total_work = work;
         chain.events.push(ChainEvent::BlockConnected {
             height: 0,
@@ -248,8 +260,16 @@ impl Chain {
     }
 
     /// Updates network-adjusted time used for future-drift checks.
-    pub fn set_network_time(&mut self, network_time: u32) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainError::InvalidNetworkTime`] when `network_time` is zero.
+    pub fn set_network_time(&mut self, network_time: u32) -> Result<(), ChainError> {
+        if network_time == 0 {
+            return Err(ChainError::InvalidNetworkTime);
+        }
         self.network_time = network_time;
+        Ok(())
     }
 
     /// Returns and clears pending chain events.
@@ -264,6 +284,14 @@ impl Chain {
 
     /// Attempts to connect a block to the chain.
     pub fn connect_block(&mut self, block: Block) -> Result<ConnectResult, ChainError> {
+        self.connect_block_inner(block, true)
+    }
+
+    fn connect_block_inner(
+        &mut self,
+        block: Block,
+        process_orphans: bool,
+    ) -> Result<ConnectResult, ChainError> {
         self.validate_block_limits(&block)?;
 
         let hash = block.hash();
@@ -304,6 +332,7 @@ impl Chain {
                 },
             );
             self.blocks.push(block);
+            self.active_hashes.insert(hash);
             self.total_work = candidate_work;
             self.events.push(ChainEvent::BlockConnected {
                 height,
@@ -314,7 +343,9 @@ impl Chain {
                     .map(|b| b.transactions.len())
                     .unwrap_or(0),
             });
-            self.process_orphans()?;
+            if process_orphans {
+                self.process_orphans()?;
+            }
             return Ok(ConnectResult::Connected { height, hash });
         }
 
@@ -339,6 +370,10 @@ impl Chain {
             old_tip,
             new_tip,
         });
+
+        if process_orphans {
+            self.process_orphans()?;
+        }
 
         Ok(ConnectResult::Reorganized { old_tip, new_tip })
     }
@@ -386,7 +421,33 @@ impl Chain {
         new_tip_work: ChainWork,
     ) -> Result<u32, ChainError> {
         let (fork_path, fork_hash) = self.collect_fork_path(new_block)?;
-        let fork_height = self.find_height(&fork_hash);
+        self.validate_fork_path(&fork_path, fork_hash)?;
+
+        let blocks_snapshot = self.blocks.clone();
+        let utxo_snapshot = self.utxo.clone();
+        let work_snapshot = self.total_work;
+        let active_hashes_snapshot = self.active_hashes.clone();
+
+        let result = self.try_reorg_to_block(fork_path, fork_hash, new_tip_work);
+        if result.is_err() {
+            self.blocks = blocks_snapshot;
+            self.utxo = utxo_snapshot;
+            self.total_work = work_snapshot;
+            self.active_hashes = active_hashes_snapshot;
+        }
+
+        result
+    }
+
+    fn try_reorg_to_block(
+        &mut self,
+        fork_path: Vec<Block>,
+        fork_hash: [u8; 32],
+        new_tip_work: ChainWork,
+    ) -> Result<u32, ChainError> {
+        let _ = self
+            .find_height(&fork_hash)
+            .ok_or(ChainError::MissingAncestor)?;
         let mut disconnected = 0u32;
 
         while self.tip_hash() != fork_hash {
@@ -419,6 +480,7 @@ impl Chain {
                 },
             );
             self.blocks.push(block);
+            self.active_hashes.insert(hash);
             self.events.push(ChainEvent::BlockConnected {
                 height,
                 hash,
@@ -431,18 +493,68 @@ impl Chain {
         }
 
         self.total_work = new_tip_work;
-        self.process_orphans()?;
-        let _ = fork_height;
         Ok(disconnected)
+    }
+
+    fn validate_fork_path(
+        &self,
+        fork_path: &[Block],
+        fork_hash: [u8; 32],
+    ) -> Result<(), ChainError> {
+        if !self.active_hashes.contains(&fork_hash) {
+            return Err(ChainError::MissingAncestor);
+        }
+
+        let mut utxo = self.utxo_at_active_ancestor(fork_hash)?;
+        let mut parent_hash = fork_hash;
+        let mut parent = self.known.get(&fork_hash).map(|meta| &meta.block);
+
+        for block in fork_path {
+            let height = self
+                .find_height(&parent_hash)
+                .map(|h| h + 1)
+                .ok_or(ChainError::MissingAncestor)?;
+            self.validate_block_header_for_parent(block, parent, Some(parent_hash), height)?;
+            self.validate_block_transactions_for_utxo(block, &utxo)?;
+            for tx in &block.transactions {
+                utxo.apply_transaction(tx);
+            }
+            parent_hash = block.hash();
+            parent = Some(block);
+        }
+
+        Ok(())
+    }
+
+    fn utxo_at_active_ancestor(&self, ancestor_hash: [u8; 32]) -> Result<UtxoSet, ChainError> {
+        if !self.active_hashes.contains(&ancestor_hash) {
+            return Err(ChainError::MissingAncestor);
+        }
+
+        let mut utxo = self.utxo.clone();
+        let mut tip_hash = self.tip_hash();
+
+        while tip_hash != ancestor_hash {
+            let meta = self
+                .known
+                .get(&tip_hash)
+                .ok_or(ChainError::MissingAncestor)?
+                .clone();
+            for undo in meta.undo.iter().rev() {
+                utxo.disconnect_undo(undo);
+            }
+            tip_hash = meta.block.header.prev_blockhash;
+        }
+
+        Ok(utxo)
     }
 
     fn collect_fork_path(&self, block: Block) -> Result<(Vec<Block>, [u8; 32]), ChainError> {
         let mut path = vec![block];
-        let active_hashes: HashSet<[u8; 32]> = self.blocks.iter().map(Block::hash).collect();
 
         while let Some(tip) = path.last() {
             let parent_hash = tip.header.prev_blockhash;
-            if active_hashes.contains(&parent_hash) {
+            if self.active_hashes.contains(&parent_hash) {
                 break;
             }
             let parent = self
@@ -466,6 +578,7 @@ impl Chain {
     fn disconnect_tip_block(&mut self) -> Result<(), ChainError> {
         let block = self.blocks.pop().ok_or(ChainError::NoActiveTip)?;
         let hash = block.hash();
+        self.active_hashes.remove(&hash);
         let height = self.height().saturating_add(1);
         let meta = self
             .known
@@ -489,26 +602,30 @@ impl Chain {
     }
 
     fn process_orphans(&mut self) -> Result<(), ChainError> {
-        loop {
-            let ready: Vec<[u8; 32]> = self
-                .orphans
-                .iter()
-                .filter(|(_, entry)| self.known.contains_key(&entry.block.header.prev_blockhash))
-                .map(|(hash, _)| *hash)
-                .collect();
+        let mut queue = VecDeque::new();
+        self.enqueue_ready_orphans(&mut queue);
 
-            if ready.is_empty() {
-                break;
-            }
+        while let Some(block) = queue.pop_front() {
+            self.connect_block_inner(block, false)?;
+            self.enqueue_ready_orphans(&mut queue);
+        }
 
-            for hash in ready {
-                let Some(entry) = self.orphans.remove(&hash) else {
-                    continue;
-                };
-                let _ = self.connect_block(entry.block)?;
+        Ok(())
+    }
+
+    fn enqueue_ready_orphans(&mut self, queue: &mut VecDeque<Block>) {
+        let ready: Vec<[u8; 32]> = self
+            .orphans
+            .iter()
+            .filter(|(_, entry)| self.known.contains_key(&entry.block.header.prev_blockhash))
+            .map(|(hash, _)| *hash)
+            .collect();
+
+        for hash in ready {
+            if let Some(entry) = self.orphans.remove(&hash) {
+                queue.push_back(entry.block);
             }
         }
-        Ok(())
     }
 
     fn validate_block_limits(&self, block: &Block) -> Result<(), ChainError> {
@@ -537,6 +654,17 @@ impl Chain {
     }
 
     fn validate_block_for_parent(
+        &self,
+        block: &Block,
+        parent: Option<&Block>,
+        parent_hash: Option<[u8; 32]>,
+        height: u32,
+    ) -> Result<(), ChainError> {
+        self.validate_block_header_for_parent(block, parent, parent_hash, height)?;
+        self.validate_block_transactions_for_utxo(block, &self.utxo)
+    }
+
+    fn validate_block_header_for_parent(
         &self,
         block: &Block,
         parent: Option<&Block>,
@@ -583,9 +711,17 @@ impl Chain {
             });
         }
 
+        Ok(())
+    }
+
+    fn validate_block_transactions_for_utxo(
+        &self,
+        block: &Block,
+        utxo: &UtxoSet,
+    ) -> Result<(), ChainError> {
         let mut spent = HashSet::new();
         for tx in &block.transactions {
-            self.utxo.validate_transaction(tx)?;
+            utxo.validate_transaction(tx)?;
             if !UtxoSet::is_coinbase(tx) {
                 for input in &tx.inputs {
                     let key = (input.previous_output, input.index);
@@ -640,6 +776,12 @@ impl Chain {
             return Ok(tip.header.bits);
         }
 
+        debug_assert_eq!(
+            self.blocks.len(),
+            height as usize,
+            "expected_bits must be called before the block is pushed"
+        );
+
         let period_start = height.saturating_sub(DIFFICULTY_ADJUSTMENT_INTERVAL) as usize;
         let period_end = height as usize;
         if period_start >= self.blocks.len() {
@@ -654,8 +796,8 @@ impl Chain {
         Ok(adjust_bits(prev_bits, actual_timespan)?)
     }
 
-    fn find_height(&self, hash: &[u8; 32]) -> u32 {
-        self.known.get(hash).map(|m| m.height).unwrap_or(0)
+    fn find_height(&self, hash: &[u8; 32]) -> Option<u32> {
+        self.known.get(hash).map(|m| m.height)
     }
 }
 
@@ -918,5 +1060,58 @@ mod tests {
         assert_eq!(chain.height(), 2);
         assert_eq!(chain.tip_hash(), fork_b2_hash);
         assert_eq!(chain.utxo().len(), 3);
+    }
+
+    #[test]
+    fn rejects_zero_network_time_at_genesis() {
+        let genesis = genesis_block();
+        assert!(matches!(
+            Chain::new_genesis(genesis, 0),
+            Err(ChainError::InvalidNetworkTime)
+        ));
+    }
+
+    #[test]
+    fn promotes_deep_orphan_chain_iteratively() {
+        let genesis = genesis_block();
+        let genesis_hash = genesis.hash();
+        let mut chain = Chain::new_genesis(genesis, 1231006505).expect("genesis ok");
+
+        let mut blocks = Vec::new();
+        let mut prev_hash = genesis_hash;
+
+        for height in 1..=12 {
+            let header = BlockHeader {
+                version: 1,
+                prev_blockhash: prev_hash,
+                merkle_root: [0u8; 32],
+                time: 1231006505 + height,
+                bits: 0x1f00_ffff,
+                nonce: 0,
+            };
+            let mut block = Block::coinbase(header, height, 50_0000_0000);
+            block.header.merkle_root = block.merkle_root().expect("merkle");
+            let target = Target::from_bits(block.header.bits).expect("bits");
+            mine_header(&mut block.header, target);
+            prev_hash = block.hash();
+            blocks.push(block);
+        }
+
+        for block in blocks.iter().skip(1) {
+            assert!(matches!(
+                chain.connect_block(block.clone()).expect("store orphan"),
+                ConnectResult::Orphaned { .. }
+            ));
+        }
+        assert_eq!(chain.height(), 0);
+
+        assert!(matches!(
+            chain
+                .connect_block(blocks[0].clone())
+                .expect("connect first block"),
+            ConnectResult::Connected { height: 1, .. }
+        ));
+        assert_eq!(chain.height(), 12);
+        assert_eq!(chain.utxo().len(), 13);
     }
 }

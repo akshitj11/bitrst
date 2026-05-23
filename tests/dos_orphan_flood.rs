@@ -29,7 +29,7 @@ fn mined_genesis() -> Block {
 
 #[test]
 fn evicts_oldest_orphan_when_pool_full() {
-    let mut chain = Chain::new_genesis(mined_genesis(), 0).expect("genesis");
+    let mut chain = Chain::new_genesis(mined_genesis(), 1231006505).expect("genesis");
 
     for index in 0..=MAX_ORPHAN_BLOCKS {
         let header = BlockHeader {

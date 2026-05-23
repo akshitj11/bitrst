@@ -84,9 +84,46 @@ impl Transaction {
         out
     }
 
+    /// Returns the serialized transaction size in bytes (wire format).
+    pub fn serialized_size(&self) -> usize {
+        use crate::transaction::compact_size_encoded_len;
+
+        4 + compact_size_encoded_len(self.inputs.len() as u64)
+            + self
+                .inputs
+                .iter()
+                .map(|input| {
+                    32 + 4
+                        + compact_size_encoded_len(input.script_sig.len() as u64)
+                        + input.script_sig.len()
+                        + 4
+                })
+                .sum::<usize>()
+            + compact_size_encoded_len(self.outputs.len() as u64)
+            + self
+                .outputs
+                .iter()
+                .map(|output| {
+                    8 + compact_size_encoded_len(output.script_pubkey.len() as u64)
+                        + output.script_pubkey.len()
+                })
+                .sum::<usize>()
+            + 4
+    }
+
     /// Returns this transaction's SHA-256d transaction ID.
     pub fn txid(&self) -> [u8; 32] {
         sha256d(&self.serialize())
+    }
+}
+
+/// Returns the byte length of a Bitcoin compact-size encoding for `value`.
+pub(crate) fn compact_size_encoded_len(value: u64) -> usize {
+    match value {
+        0..=0xfc => 1,
+        0xfd..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
     }
 }
 

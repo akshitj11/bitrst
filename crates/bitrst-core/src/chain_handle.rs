@@ -45,8 +45,7 @@ impl ChainHandle {
 
     /// Updates network-adjusted time used for future-drift checks.
     pub fn set_network_time(&self, network_time: u32) -> Result<(), ChainError> {
-        self.write()?.set_network_time(network_time);
-        Ok(())
+        self.write()?.set_network_time(network_time)
     }
 
     fn read(&self) -> Result<RwLockReadGuard<'_, Chain>, ChainError> {

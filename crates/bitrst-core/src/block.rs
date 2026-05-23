@@ -81,8 +81,17 @@ impl Block {
     }
 
     /// Returns the serialized block size in bytes (wire format).
+    ///
+    /// Computed analytically without allocating a serialization buffer.
     pub fn serialized_size(&self) -> usize {
-        self.serialize().len()
+        use crate::transaction::compact_size_encoded_len;
+
+        80 + compact_size_encoded_len(self.transactions.len() as u64)
+            + self
+                .transactions
+                .iter()
+                .map(Transaction::serialized_size)
+                .sum::<usize>()
     }
 
     /// Serializes the full block in Bitcoin P2P wire format.
@@ -200,6 +209,7 @@ mod tests {
         let block = Block::coinbase(sample_header(), 1, 50_0000_0000);
         let serialized = block.serialize();
 
+        assert_eq!(serialized.len(), block.serialized_size());
         assert_eq!(
             serialized.len(),
             80 + 1 + block.transactions[0].serialize().len()
