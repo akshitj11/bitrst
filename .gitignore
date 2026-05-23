@@ -2,4 +2,6 @@ target/
 AGENTS.md
 bitrst-plan.txt
 bitrst-plan*.txt
+bitrst_universal_guide.md
+bitrst_additional_tests.md
 devlog/recovery/
