@@ -4,7 +4,7 @@
 pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 4_000_000;
 
 /// Maximum orphan blocks held while waiting for parents.
-pub const MAX_ORPHAN_BLOCKS: usize = 100;
+pub const MAX_ORPHAN_BLOCKS: usize = 256;
 
 /// Maximum transactions per block (protocol upper bound).
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 25_000;

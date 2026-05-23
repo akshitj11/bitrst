@@ -12,7 +12,7 @@ use thiserror::Error;
 use crate::block::Block;
 use crate::chain_events::{ChainEvent, EvictionReason};
 use crate::difficulty::{
-    adjust_bits, DifficultyError, DIFFICULTY_ADJUSTMENT_INTERVAL, MAX_COMPACT_BITS,
+    adjust_bits, difficulty_adjustment_interval, DifficultyError, MAX_COMPACT_BITS,
 };
 use crate::limits::{
     MAX_BLOCK_SERIALIZED_SIZE, MAX_ORPHAN_BLOCKS, MAX_SCRIPT_SIZE, MAX_TRANSACTIONS_PER_BLOCK,
@@ -20,10 +20,11 @@ use crate::limits::{
 use crate::pow::Target;
 use crate::store::{BlockStore, MemoryBlockStore, StoreError};
 use crate::time::valid_block_time;
+use crate::uint256::cmp_le;
 use crate::utxo::{TxUndo, UtxoError, UtxoSet};
 
 /// Total cumulative proof-of-work on a chain branch (256-bit, compared MSB-first).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ChainWork(pub [u8; 32]);
 
 impl ChainWork {
@@ -39,9 +40,25 @@ impl ChainWork {
         debug_assert_eq!(carry, 0, "ChainWork addition overflowed 256 bits");
         Self(out)
     }
+}
 
+impl PartialEq for ChainWork {
+    fn eq(&self, other: &Self) -> bool {
+        cmp_le(&self.0, &other.0) == Ordering::Equal
+    }
+}
+
+impl Eq for ChainWork {}
+
+impl PartialOrd for ChainWork {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ChainWork {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.iter().rev().cmp(other.0.iter().rev())
+        cmp_le(&self.0, &other.0)
     }
 }
 
@@ -249,9 +266,19 @@ impl Chain {
         self.blocks.len().saturating_sub(1) as u32
     }
 
+    /// Returns the number of blocks on the active chain (genesis included).
+    pub fn active_block_count(&self) -> usize {
+        self.blocks.len()
+    }
+
     /// Returns the hash of the active chain tip.
     pub fn tip_hash(&self) -> [u8; 32] {
         self.blocks.last().map(Block::hash).unwrap_or([0u8; 32])
+    }
+
+    /// Returns the block at `height` on the active chain (genesis is height 0).
+    pub fn active_block_at(&self, height: u32) -> Option<&Block> {
+        self.blocks.get(height as usize)
     }
 
     /// Returns a reference to the active UTXO set.
@@ -295,7 +322,7 @@ impl Chain {
         self.validate_block_limits(&block)?;
 
         let hash = block.hash();
-        if self.known.contains_key(&hash) {
+        if self.known.contains_key(&hash) || self.orphans.contains_key(&hash) {
             return Err(ChainError::BlockAlreadyKnown);
         }
 
@@ -349,7 +376,7 @@ impl Chain {
             return Ok(ConnectResult::Connected { height, hash });
         }
 
-        if candidate_work.cmp(&self.total_work) != Ordering::Greater {
+        if candidate_work <= self.total_work {
             self.known.insert(
                 hash,
                 BlockMeta {
@@ -415,13 +442,13 @@ impl Chain {
         }
     }
 
+    /// Reorganizes to a heavier fork; snapshots active state and restores on failure.
     fn reorg_to_block(
         &mut self,
         new_block: Block,
         new_tip_work: ChainWork,
     ) -> Result<u32, ChainError> {
         let (fork_path, fork_hash) = self.collect_fork_path(new_block)?;
-        self.validate_fork_path(&fork_path, fork_hash)?;
 
         let blocks_snapshot = self.blocks.clone();
         let utxo_snapshot = self.utxo.clone();
@@ -494,59 +521,6 @@ impl Chain {
 
         self.total_work = new_tip_work;
         Ok(disconnected)
-    }
-
-    fn validate_fork_path(
-        &self,
-        fork_path: &[Block],
-        fork_hash: [u8; 32],
-    ) -> Result<(), ChainError> {
-        if !self.active_hashes.contains(&fork_hash) {
-            return Err(ChainError::MissingAncestor);
-        }
-
-        let mut utxo = self.utxo_at_active_ancestor(fork_hash)?;
-        let mut parent_hash = fork_hash;
-        let mut parent = self.known.get(&fork_hash).map(|meta| &meta.block);
-
-        for block in fork_path {
-            let height = self
-                .find_height(&parent_hash)
-                .map(|h| h + 1)
-                .ok_or(ChainError::MissingAncestor)?;
-            self.validate_block_header_for_parent(block, parent, Some(parent_hash), height)?;
-            self.validate_block_transactions_for_utxo(block, &utxo)?;
-            for tx in &block.transactions {
-                utxo.apply_transaction(tx);
-            }
-            parent_hash = block.hash();
-            parent = Some(block);
-        }
-
-        Ok(())
-    }
-
-    fn utxo_at_active_ancestor(&self, ancestor_hash: [u8; 32]) -> Result<UtxoSet, ChainError> {
-        if !self.active_hashes.contains(&ancestor_hash) {
-            return Err(ChainError::MissingAncestor);
-        }
-
-        let mut utxo = self.utxo.clone();
-        let mut tip_hash = self.tip_hash();
-
-        while tip_hash != ancestor_hash {
-            let meta = self
-                .known
-                .get(&tip_hash)
-                .ok_or(ChainError::MissingAncestor)?
-                .clone();
-            for undo in meta.undo.iter().rev() {
-                utxo.disconnect_undo(undo);
-            }
-            tip_hash = meta.block.header.prev_blockhash;
-        }
-
-        Ok(utxo)
     }
 
     fn collect_fork_path(&self, block: Block) -> Result<(Vec<Block>, [u8; 32]), ChainError> {
@@ -769,7 +743,7 @@ impl Chain {
             return Ok(block_bits);
         }
 
-        if !height.is_multiple_of(DIFFICULTY_ADJUSTMENT_INTERVAL) {
+        if !height.is_multiple_of(difficulty_adjustment_interval()) {
             let Some(tip) = self.blocks.last() else {
                 return Err(ChainError::NoActiveTip);
             };
@@ -782,7 +756,7 @@ impl Chain {
             "expected_bits must be called before the block is pushed"
         );
 
-        let period_start = height.saturating_sub(DIFFICULTY_ADJUSTMENT_INTERVAL) as usize;
+        let period_start = height.saturating_sub(difficulty_adjustment_interval()) as usize;
         let period_end = height as usize;
         if period_start >= self.blocks.len() {
             return Ok(MAX_COMPACT_BITS);
@@ -849,7 +823,7 @@ mod tests {
         let bits = 0x1f00_ffff_u32;
         let one = block_work(bits).expect("work");
         let two = one.add(one);
-        assert_eq!(two.cmp(&one), std::cmp::Ordering::Greater);
+        assert!(two > one);
     }
 
     #[test]
@@ -865,6 +839,9 @@ mod tests {
     fn rejects_block_with_bad_proof_of_work() {
         let genesis = genesis_block();
         let mut chain = Chain::new_genesis(genesis.clone(), 1231006505).expect("genesis ok");
+        let before_tip = chain.tip_hash();
+        let before_height = chain.height();
+        let before_utxo = chain.utxo().len();
 
         let mut bad_header = genesis.header.clone();
         bad_header.prev_blockhash = genesis.hash();
@@ -876,12 +853,18 @@ mod tests {
             chain.connect_block(bad),
             Err(ChainError::InvalidProofOfWork)
         ));
+        assert_eq!(chain.tip_hash(), before_tip);
+        assert_eq!(chain.height(), before_height);
+        assert_eq!(chain.utxo().len(), before_utxo);
     }
 
     #[test]
     fn rejects_block_with_mismatched_merkle_root() {
         let genesis = genesis_block();
         let mut chain = Chain::new_genesis(genesis.clone(), 1231006505).expect("genesis ok");
+        let before_tip = chain.tip_hash();
+        let before_height = chain.height();
+        let before_utxo = chain.utxo().len();
 
         let header = BlockHeader {
             version: 1,
@@ -898,6 +881,9 @@ mod tests {
             chain.connect_block(bad),
             Err(ChainError::MerkleRootMismatch)
         ));
+        assert_eq!(chain.tip_hash(), before_tip);
+        assert_eq!(chain.height(), before_height);
+        assert_eq!(chain.utxo().len(), before_utxo);
     }
 
     #[test]

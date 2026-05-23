@@ -8,6 +8,9 @@ bitrst-crypto = { path = "../bitrst-crypto" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 
+[features]
+test-short-period = []
+
 [dev-dependencies]
 hex = "0.4"
 serde_json = "1"

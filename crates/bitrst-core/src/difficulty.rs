@@ -11,6 +11,15 @@ use thiserror::Error;
 /// Blocks between difficulty adjustments on Bitcoin mainnet.
 pub const DIFFICULTY_ADJUSTMENT_INTERVAL: u32 = 2016;
 
+/// Returns the active adjustment interval (shorter in integration tests).
+pub const fn difficulty_adjustment_interval() -> u32 {
+    if cfg!(feature = "test-short-period") {
+        256
+    } else {
+        DIFFICULTY_ADJUSTMENT_INTERVAL
+    }
+}
+
 /// Target spacing between blocks in seconds (10 minutes).
 pub const TARGET_BLOCK_SPACING: u32 = 600;
 

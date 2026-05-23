@@ -11,5 +11,5 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all
+      - run: cargo clippy --all-targets --all-features --features test-short-period -- -D warnings
+      - run: cargo test --all --features test-short-period

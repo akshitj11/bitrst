@@ -18,6 +18,8 @@ Bitcoin from scratch, in Rust.
 - Block timestamp validation (MTP and future-drift limits)
 - `Chain` validation: connect blocks, UTXO checks, orphans, reorg by cumulative work
 - M4.5 workspace hardening: spec-aligned `block_work`, DoS limits, fork-aware MTP, `ChainHandle`, events, block store trait
+- M4.6 chain robustness: reorg snapshot rollback, iterative orphan promotion, `active_hashes`, analytic `serialized_size`
+- Universal-guide chain consensus integration tests (reorg safety, orphans, difficulty, validation, events)
 - CI for tests and clippy
 
 ## Roadmap
@@ -27,4 +29,5 @@ Bitcoin from scratch, in Rust.
 3. Proof of work: done
 4. Chain validation: done
 5. Workspace hardening (M4.5): done
-6. Script VM: next
+6. Chain robustness (M4.6): done
+7. Script VM: next
