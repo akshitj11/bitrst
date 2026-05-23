@@ -62,6 +62,14 @@ impl Target {
         compare_internal_hash(hash, &self.threshold) != Ordering::Greater
     }
 
+    /// Returns the per-block proof-of-work value used for cumulative chain work.
+    ///
+    /// Matches Bitcoin Core `GetBlockProof`: `(~target / (target + 1)) + 1`.
+    /// Reference: <https://github.com/bitcoin/bitcoin/blob/master/src/chain.cpp>
+    pub fn to_work(&self) -> Option<[u8; 32]> {
+        crate::uint256::work_from_target(self.threshold)
+    }
+
     /// Encodes this target as Bitcoin's compact `bits` representation.
     ///
     /// Returns `None` when the target is zero or cannot be represented in the

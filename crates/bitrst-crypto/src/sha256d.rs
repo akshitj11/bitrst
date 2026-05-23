@@ -1,6 +1,9 @@
 use sha2::{Digest, Sha256};
 
 /// Returns Bitcoin's SHA-256d hash for the provided bytes.
+///
+/// Bitcoin hashes are compared in internal little-endian byte order when
+/// checking proof-of-work targets; display order reverses bytes for hex.
 pub fn sha256d(data: &[u8]) -> [u8; 32] {
     let first = Sha256::digest(data);
     let second = Sha256::digest(first);

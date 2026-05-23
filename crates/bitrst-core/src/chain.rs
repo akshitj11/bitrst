@@ -10,24 +10,37 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 use crate::block::Block;
+use crate::chain_events::{ChainEvent, EvictionReason};
 use crate::difficulty::{
     adjust_bits, DifficultyError, DIFFICULTY_ADJUSTMENT_INTERVAL, MAX_COMPACT_BITS,
 };
+use crate::limits::{
+    MAX_BLOCK_SERIALIZED_SIZE, MAX_ORPHAN_BLOCKS, MAX_SCRIPT_SIZE, MAX_TRANSACTIONS_PER_BLOCK,
+};
 use crate::pow::Target;
+use crate::store::{BlockStore, MemoryBlockStore, StoreError};
 use crate::time::valid_block_time;
 use crate::utxo::{TxUndo, UtxoError, UtxoSet};
 
-/// Total cumulative proof-of-work on a chain branch.
+/// Total cumulative proof-of-work on a chain branch (256-bit, compared MSB-first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ChainWork(u128);
+pub struct ChainWork(pub [u8; 32]);
 
 impl ChainWork {
+    #[allow(clippy::needless_range_loop)]
     fn add(self, other: Self) -> Self {
-        Self(self.0.saturating_add(other.0))
+        let mut out = [0u8; 32];
+        let mut carry = 0u16;
+        for index in 0..32 {
+            let sum = u16::from(self.0[index]) + u16::from(other.0[index]) + carry;
+            out[index] = sum as u8;
+            carry = sum >> 8;
+        }
+        Self(out)
     }
 
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.cmp(&other.0)
+        self.0.iter().rev().cmp(other.0.iter().rev())
     }
 }
 
@@ -119,6 +132,34 @@ pub enum ChainError {
     /// The genesis block was invalid.
     #[error("invalid genesis block")]
     InvalidGenesis,
+
+    /// The block exceeds protocol size limits.
+    #[error("block exceeds maximum serialized size")]
+    BlockTooLarge,
+
+    /// Too many transactions in the block.
+    #[error("block exceeds maximum transaction count")]
+    TooManyTransactions,
+
+    /// A script in the block exceeds the size limit.
+    #[error("transaction script exceeds maximum size")]
+    ScriptTooLarge,
+
+    /// An ancestor required for fork walking was missing from the block index.
+    #[error("missing ancestor block in index")]
+    MissingAncestor,
+
+    /// The active chain has no tip to disconnect.
+    #[error("no active tip to disconnect")]
+    NoActiveTip,
+
+    /// Block storage failed.
+    #[error("block storage error")]
+    Store(#[from] StoreError),
+
+    /// An internal lock was poisoned.
+    #[error("chain lock poisoned")]
+    LockPoisoned,
 }
 
 #[derive(Debug, Clone)]
@@ -129,29 +170,28 @@ struct BlockMeta {
     undo: Vec<TxUndo>,
 }
 
+#[derive(Debug, Clone)]
+struct OrphanEntry {
+    block: Block,
+    received_at: u64,
+}
+
 /// In-memory block chain with UTXO state and orphan handling.
 #[derive(Debug)]
 pub struct Chain {
-    /// Active chain blocks from genesis (height 0) to tip.
     blocks: Vec<Block>,
-    /// All blocks this node knows, including side-chain headers without UTXO application.
     known: HashMap<[u8; 32], BlockMeta>,
-    /// Active chain cumulative proof-of-work.
     total_work: ChainWork,
-    /// Current UTXO set for the active chain.
     utxo: UtxoSet,
-    /// Blocks waiting for a parent to arrive first.
-    orphans: HashMap<[u8; 32], Block>,
-    /// Network-adjusted time used for future-drift checks.
+    orphans: HashMap<[u8; 32], OrphanEntry>,
+    orphan_receive_seq: u64,
     network_time: u32,
+    store: MemoryBlockStore,
+    events: Vec<ChainEvent>,
 }
 
 impl Chain {
     /// Creates a new chain with a valid genesis block at height 0.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ChainError`] when the genesis block fails validation.
     pub fn new_genesis(genesis: Block, network_time: u32) -> Result<Self, ChainError> {
         let mut chain = Self {
             blocks: Vec::new(),
@@ -159,14 +199,19 @@ impl Chain {
             total_work: ChainWork::default(),
             utxo: UtxoSet::new(),
             orphans: HashMap::new(),
+            orphan_receive_seq: 0,
             network_time,
+            store: MemoryBlockStore::new(),
+            events: Vec::new(),
         };
 
         let hash = genesis.hash();
-        chain.validate_block_for_parent(&genesis, None, 0)?;
+        chain.validate_block_limits(&genesis)?;
+        chain.validate_block_for_parent(&genesis, None, None, 0)?;
         let undo = chain.apply_block_transactions(&genesis)?;
-        let work = block_work(genesis.header.bits);
+        let work = block_work(genesis.header.bits)?;
 
+        chain.store.put_block(&genesis)?;
         chain.known.insert(
             hash,
             BlockMeta {
@@ -178,6 +223,11 @@ impl Chain {
         );
         chain.blocks.push(genesis);
         chain.total_work = work;
+        chain.events.push(ChainEvent::BlockConnected {
+            height: 0,
+            hash,
+            tx_count: chain.blocks[0].transactions.len(),
+        });
 
         Ok(chain)
     }
@@ -197,13 +247,25 @@ impl Chain {
         &self.utxo
     }
 
+    /// Updates network-adjusted time used for future-drift checks.
+    pub fn set_network_time(&mut self, network_time: u32) {
+        self.network_time = network_time;
+    }
+
+    /// Returns and clears pending chain events.
+    pub fn take_events(&mut self) -> Vec<ChainEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Returns a reference to the block store.
+    pub fn block_store(&self) -> &MemoryBlockStore {
+        &self.store
+    }
+
     /// Attempts to connect a block to the chain.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ChainError`] when the block fails validation. Returns
-    /// [`ConnectResult::Orphaned`] without error when the parent is unknown.
     pub fn connect_block(&mut self, block: Block) -> Result<ConnectResult, ChainError> {
+        self.validate_block_limits(&block)?;
+
         let hash = block.hash();
         if self.known.contains_key(&hash) {
             return Err(ChainError::BlockAlreadyKnown);
@@ -211,14 +273,19 @@ impl Chain {
 
         let parent_hash = block.header.prev_blockhash;
         let Some(parent_meta) = self.known.get(&parent_hash).cloned() else {
-            self.orphans.insert(hash, block);
+            self.insert_orphan(block)?;
             return Ok(ConnectResult::Orphaned { hash });
         };
 
         let height = parent_meta.height + 1;
-        self.validate_block_for_parent(&block, Some(&parent_meta.block), height)?;
+        self.validate_block_for_parent(
+            &block,
+            Some(&parent_meta.block),
+            Some(parent_hash),
+            height,
+        )?;
 
-        let block_work = block_work(block.header.bits);
+        let block_work = block_work(block.header.bits)?;
         let candidate_work = parent_meta.work.add(block_work);
 
         let tip_hash = self.tip_hash();
@@ -226,6 +293,7 @@ impl Chain {
 
         if extends_tip {
             let undo = self.apply_block_transactions(&block)?;
+            self.store.put_block(&block)?;
             self.known.insert(
                 hash,
                 BlockMeta {
@@ -237,6 +305,15 @@ impl Chain {
             );
             self.blocks.push(block);
             self.total_work = candidate_work;
+            self.events.push(ChainEvent::BlockConnected {
+                height,
+                hash,
+                tx_count: self
+                    .blocks
+                    .last()
+                    .map(|b| b.transactions.len())
+                    .unwrap_or(0),
+            });
             self.process_orphans()?;
             return Ok(ConnectResult::Connected { height, hash });
         }
@@ -255,37 +332,83 @@ impl Chain {
         }
 
         let old_tip = tip_hash;
-        self.reorg_to_block(block, parent_meta, candidate_work)?;
+        let depth = self.reorg_to_block(block, candidate_work)?;
         let new_tip = self.tip_hash();
+        self.events.push(ChainEvent::ChainReorg {
+            depth,
+            old_tip,
+            new_tip,
+        });
 
         Ok(ConnectResult::Reorganized { old_tip, new_tip })
+    }
+
+    fn insert_orphan(&mut self, block: Block) -> Result<(), ChainError> {
+        if self.orphans.len() >= MAX_ORPHAN_BLOCKS {
+            self.evict_oldest_orphan();
+        }
+
+        let hash = block.hash();
+        self.orphan_receive_seq = self.orphan_receive_seq.wrapping_add(1);
+        self.orphans.insert(
+            hash,
+            OrphanEntry {
+                block,
+                received_at: self.orphan_receive_seq,
+            },
+        );
+        self.events.push(ChainEvent::OrphanAdded {
+            hash,
+            pool_size: self.orphans.len(),
+        });
+        Ok(())
+    }
+
+    fn evict_oldest_orphan(&mut self) {
+        let oldest = self
+            .orphans
+            .iter()
+            .min_by_key(|(_, entry)| entry.received_at)
+            .map(|(hash, _)| *hash);
+
+        if let Some(hash) = oldest {
+            self.orphans.remove(&hash);
+            self.events.push(ChainEvent::OrphanEvicted {
+                hash,
+                reason: EvictionReason::PoolFull,
+            });
+        }
     }
 
     fn reorg_to_block(
         &mut self,
         new_block: Block,
-        _parent_meta: BlockMeta,
         new_tip_work: ChainWork,
-    ) -> Result<(), ChainError> {
-        let (fork_path, fork_hash) = self.collect_fork_path(new_block);
+    ) -> Result<u32, ChainError> {
+        let (fork_path, fork_hash) = self.collect_fork_path(new_block)?;
+        let fork_height = self.find_height(&fork_hash);
+        let mut disconnected = 0u32;
 
         while self.tip_hash() != fork_hash {
             self.disconnect_tip_block()?;
+            disconnected += 1;
         }
 
         for block in fork_path {
             let hash = block.hash();
             let height = self.height() + 1;
             let parent = self.blocks.last();
-            self.validate_block_for_parent(&block, parent, height)?;
+            let parent_hash = block.header.prev_blockhash;
+            self.validate_block_for_parent(&block, parent, Some(parent_hash), height)?;
             let undo = self.apply_block_transactions(&block)?;
             let parent_work = self
                 .known
                 .get(&block.header.prev_blockhash)
                 .map(|meta| meta.work)
                 .unwrap_or_default();
-            let work = parent_work.add(block_work(block.header.bits));
+            let work = parent_work.add(block_work(block.header.bits)?);
 
+            self.store.put_block(&block)?;
             self.known.insert(
                 hash,
                 BlockMeta {
@@ -296,39 +419,59 @@ impl Chain {
                 },
             );
             self.blocks.push(block);
+            self.events.push(ChainEvent::BlockConnected {
+                height,
+                hash,
+                tx_count: self
+                    .blocks
+                    .last()
+                    .map(|b| b.transactions.len())
+                    .unwrap_or(0),
+            });
         }
 
         self.total_work = new_tip_work;
         self.process_orphans()?;
-        Ok(())
+        let _ = fork_height;
+        Ok(disconnected)
     }
 
-    fn collect_fork_path(&self, block: Block) -> (Vec<Block>, [u8; 32]) {
+    fn collect_fork_path(&self, block: Block) -> Result<(Vec<Block>, [u8; 32]), ChainError> {
         let mut path = vec![block];
         let active_hashes: HashSet<[u8; 32]> = self.blocks.iter().map(Block::hash).collect();
 
-        while !active_hashes.contains(&path.last().expect("path not empty").header.prev_blockhash) {
-            let parent_hash = path.last().expect("path not empty").header.prev_blockhash;
+        while let Some(tip) = path.last() {
+            let parent_hash = tip.header.prev_blockhash;
+            if active_hashes.contains(&parent_hash) {
+                break;
+            }
             let parent = self
                 .known
                 .get(&parent_hash)
-                .expect("fork parent must be known");
-            path.push(parent.block.clone());
+                .ok_or(ChainError::MissingAncestor)?
+                .block
+                .clone();
+            path.push(parent);
         }
 
-        let fork_hash = path.last().expect("path not empty").header.prev_blockhash;
+        let fork_hash = path
+            .last()
+            .ok_or(ChainError::MissingAncestor)?
+            .header
+            .prev_blockhash;
         path.reverse();
-        (path, fork_hash)
+        Ok((path, fork_hash))
     }
 
     fn disconnect_tip_block(&mut self) -> Result<(), ChainError> {
-        let block = self.blocks.pop().expect("tip block must exist");
+        let block = self.blocks.pop().ok_or(ChainError::NoActiveTip)?;
         let hash = block.hash();
+        let height = self.height().saturating_add(1);
         let meta = self
             .known
             .get(&hash)
-            .cloned()
-            .expect("known block must exist");
+            .ok_or(ChainError::MissingAncestor)?
+            .clone();
 
         for undo in meta.undo.iter().rev() {
             self.utxo.disconnect_undo(undo);
@@ -340,6 +483,8 @@ impl Chain {
             .and_then(|b| self.known.get(&b.hash()).map(|m| m.work))
             .unwrap_or_default();
 
+        self.events
+            .push(ChainEvent::BlockDisconnected { height, hash });
         Ok(())
     }
 
@@ -348,7 +493,7 @@ impl Chain {
             let ready: Vec<[u8; 32]> = self
                 .orphans
                 .iter()
-                .filter(|(_, block)| self.known.contains_key(&block.header.prev_blockhash))
+                .filter(|(_, entry)| self.known.contains_key(&entry.block.header.prev_blockhash))
                 .map(|(hash, _)| *hash)
                 .collect();
 
@@ -357,10 +502,37 @@ impl Chain {
             }
 
             for hash in ready {
-                let block = self.orphans.remove(&hash).expect("orphan must exist");
-                let _ = self.connect_block(block)?;
+                let Some(entry) = self.orphans.remove(&hash) else {
+                    continue;
+                };
+                let _ = self.connect_block(entry.block)?;
             }
         }
+        Ok(())
+    }
+
+    fn validate_block_limits(&self, block: &Block) -> Result<(), ChainError> {
+        if block.serialized_size() > MAX_BLOCK_SERIALIZED_SIZE {
+            return Err(ChainError::BlockTooLarge);
+        }
+
+        if block.transactions.len() > MAX_TRANSACTIONS_PER_BLOCK {
+            return Err(ChainError::TooManyTransactions);
+        }
+
+        for tx in &block.transactions {
+            for input in &tx.inputs {
+                if input.script_sig.len() > MAX_SCRIPT_SIZE {
+                    return Err(ChainError::ScriptTooLarge);
+                }
+            }
+            for output in &tx.outputs {
+                if output.script_pubkey.len() > MAX_SCRIPT_SIZE {
+                    return Err(ChainError::ScriptTooLarge);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -368,6 +540,7 @@ impl Chain {
         &self,
         block: &Block,
         parent: Option<&Block>,
+        parent_hash: Option<[u8; 32]>,
         height: u32,
     ) -> Result<(), ChainError> {
         let target = Target::from_bits(block.header.bits).ok_or(ChainError::InvalidProofOfWork)?;
@@ -390,8 +563,8 @@ impl Chain {
             });
         }
 
-        if let Some(parent_block) = parent {
-            let median_past = self.median_past_time();
+        if let (Some(_parent_block), Some(parent_hash)) = (parent, parent_hash) {
+            let median_past = self.median_past_time_before(parent_hash);
             if !valid_block_time(block.header.time, median_past, self.network_time) {
                 return Err(ChainError::InvalidTimestamp {
                     block_time: block.header.time,
@@ -399,8 +572,6 @@ impl Chain {
                     network_time: self.network_time,
                 });
             }
-
-            let _parent = parent_block;
         }
 
         let expected_bits = self.expected_bits(height, block.header.bits)?;
@@ -439,17 +610,20 @@ impl Chain {
         Ok(undos)
     }
 
-    fn median_past_time(&self) -> u32 {
-        let count = self.blocks.len();
-        if count == 0 {
+    fn median_past_time_before(&self, mut block_hash: [u8; 32]) -> u32 {
+        let mut times = Vec::new();
+        for _ in 0..11 {
+            let Some(meta) = self.known.get(&block_hash) else {
+                break;
+            };
+            times.push(meta.block.header.time);
+            block_hash = meta.block.header.prev_blockhash;
+        }
+
+        if times.is_empty() {
             return 0;
         }
 
-        let start = count.saturating_sub(11);
-        let mut times: Vec<u32> = self.blocks[start..]
-            .iter()
-            .map(|block| block.header.time)
-            .collect();
         times.sort_unstable();
         times[times.len() / 2]
     }
@@ -460,12 +634,10 @@ impl Chain {
         }
 
         if !height.is_multiple_of(DIFFICULTY_ADJUSTMENT_INTERVAL) {
-            return Ok(self
-                .blocks
-                .last()
-                .expect("non-genesis has parent")
-                .header
-                .bits);
+            let Some(tip) = self.blocks.last() else {
+                return Err(ChainError::NoActiveTip);
+            };
+            return Ok(tip.header.bits);
         }
 
         let period_start = height.saturating_sub(DIFFICULTY_ADJUSTMENT_INTERVAL) as usize;
@@ -481,48 +653,36 @@ impl Chain {
 
         Ok(adjust_bits(prev_bits, actual_timespan)?)
     }
+
+    fn find_height(&self, hash: &[u8; 32]) -> u32 {
+        self.known.get(hash).map(|m| m.height).unwrap_or(0)
+    }
 }
 
-pub(crate) fn block_work(bits: u32) -> ChainWork {
-    let threshold = Target::from_bits(bits)
-        .unwrap_or_else(Target::easy)
-        .threshold();
-    // Higher scalar when the target is smaller (more leading zero bytes from the MSB).
-    let leading_zeros = threshold.iter().rev().take_while(|&&b| b == 0).count() as u128;
-    let remainder = threshold
-        .iter()
-        .rev()
-        .nth(leading_zeros as usize)
-        .copied()
-        .unwrap_or(0);
-    let work = leading_zeros
-        .saturating_mul(1_000_000)
-        .saturating_add(u128::from(0xff - remainder));
-    ChainWork(work.max(1))
+/// Per-block work from compact `bits` (Bitcoin Core `GetBlockProof`).
+pub fn block_work(bits: u32) -> Result<ChainWork, ChainError> {
+    let target = Target::from_bits(bits).ok_or(ChainError::InvalidProofOfWork)?;
+    let work = target.to_work().ok_or(ChainError::InvalidProofOfWork)?;
+    Ok(ChainWork(work))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::Ordering;
-
     use super::{block_work, Chain, ChainError, ConnectResult};
     use crate::pow::Target;
     use crate::{Block, BlockHeader, Transaction};
 
-    #[test]
-    fn longer_fork_has_more_cumulative_work() {
-        let bits = 0x1f00_ffff_u32;
-        let one = block_work(bits);
-        let two = one.add(one);
-        assert_eq!(two.cmp(&one), Ordering::Greater);
-    }
-
     fn mine_header(header: &mut BlockHeader, target: Target) {
+        let mut attempts = 0u64;
         loop {
             if target.meets(&header.hash()) {
                 return;
             }
             header.nonce = header.nonce.wrapping_add(1);
+            attempts += 1;
+            if attempts > 10_000_000 {
+                panic!("test mining exceeded attempt limit");
+            }
         }
     }
 
@@ -540,6 +700,14 @@ mod tests {
         let target = Target::from_bits(bits).expect("test genesis bits should decode");
         mine_header(&mut block.header, target);
         block
+    }
+
+    #[test]
+    fn cumulative_work_adds_for_same_bits() {
+        let bits = 0x1f00_ffff_u32;
+        let one = block_work(bits).expect("work");
+        let two = one.add(one);
+        assert_eq!(two.cmp(&one), std::cmp::Ordering::Greater);
     }
 
     #[test]

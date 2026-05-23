@@ -80,6 +80,11 @@ impl Block {
         }
     }
 
+    /// Returns the serialized block size in bytes (wire format).
+    pub fn serialized_size(&self) -> usize {
+        self.serialize().len()
+    }
+
     /// Serializes the full block in Bitcoin P2P wire format.
     ///
     /// Wire layout: 80-byte header, transaction count as compact-size, then each

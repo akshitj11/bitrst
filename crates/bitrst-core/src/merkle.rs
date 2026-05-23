@@ -2,9 +2,11 @@
 
 use bitrst_crypto::sha256d::sha256d;
 
+use crate::limits::MAX_TRANSACTIONS_PER_BLOCK;
+
 /// Computes the Bitcoin Merkle root for a non-empty list of transaction IDs.
 pub fn merkle_root(txids: &[[u8; 32]]) -> Option<[u8; 32]> {
-    if txids.is_empty() {
+    if txids.is_empty() || txids.len() > MAX_TRANSACTIONS_PER_BLOCK {
         return None;
     }
 

@@ -2,30 +2,52 @@
 
 use bitrst_core::pow::Target;
 use bitrst_core::BlockHeader;
+use thiserror::Error;
+
+/// Maximum nonce attempts before mining gives up (DoS protection).
+pub const MAX_NONCE_ATTEMPTS: u64 = 10_000_000;
+
+/// Errors from the mining loop.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MineError {
+    /// Nonce search exhausted without finding a valid hash.
+    #[error("mining exceeded {MAX_NONCE_ATTEMPTS} attempts")]
+    AttemptsExceeded,
+}
 
 /// Mines a block by incrementing the nonce until the header hash meets the target.
-pub fn mine(header: &mut BlockHeader, target: Target) -> [u8; 32] {
-    loop {
+///
+/// # Errors
+///
+/// Returns [`MineError::AttemptsExceeded`] when no solution is found within
+/// [`MAX_NONCE_ATTEMPTS`].
+pub fn mine(header: &mut BlockHeader, target: Target) -> Result<[u8; 32], MineError> {
+    for _ in 0..MAX_NONCE_ATTEMPTS {
         let hash = header.hash();
         if target.meets(&hash) {
-            return hash;
+            return Ok(hash);
         }
 
         header.nonce = header.nonce.wrapping_add(1);
     }
+
+    Err(MineError::AttemptsExceeded)
 }
 
 /// Mines a block header using the compact target encoded in `header.bits`.
 ///
 /// Returns `None` when `header.bits` does not decode to a valid compact target.
-pub fn mine_with_header_bits(header: &mut BlockHeader) -> Option<[u8; 32]> {
-    let target = Target::from_bits(header.bits)?;
-    Some(mine(header, target))
+pub fn mine_with_header_bits(header: &mut BlockHeader) -> Result<Option<[u8; 32]>, MineError> {
+    let Some(target) = Target::from_bits(header.bits) else {
+        return Ok(None);
+    };
+
+    Ok(Some(mine(header, target)?))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{mine, mine_with_header_bits};
+    use super::{mine, mine_with_header_bits, MineError, MAX_NONCE_ATTEMPTS};
     use bitrst_core::pow::Target;
     use bitrst_core::BlockHeader;
 
@@ -40,7 +62,7 @@ mod tests {
             nonce: 0,
         };
 
-        let hash = mine(&mut header, Target::easy());
+        let hash = mine(&mut header, Target::easy()).expect("easy target should mine");
 
         assert_eq!(hash.len(), 32);
     }
@@ -56,10 +78,16 @@ mod tests {
             nonce: 0,
         };
 
-        assert_eq!(mine_with_header_bits(&mut header), None);
+        assert_eq!(
+            mine_with_header_bits(&mut header).expect("should not panic"),
+            None
+        );
 
         header.bits = 0x0180_0000;
-        assert_eq!(mine_with_header_bits(&mut header), None);
+        assert_eq!(
+            mine_with_header_bits(&mut header).expect("should not panic"),
+            None
+        );
     }
 
     #[test]
@@ -78,9 +106,16 @@ mod tests {
         };
 
         let target = Target::from_bits(header.bits).expect("test bits should decode");
-        let hash = mine_with_header_bits(&mut header).expect("valid bits should mine");
+        let hash = mine_with_header_bits(&mut header)
+            .expect("valid bits should mine")
+            .expect("some hash");
 
         assert!(target.meets(&hash));
         assert_eq!(header.nonce, 2083236893);
+    }
+
+    #[test]
+    fn mine_respects_attempt_limit_constant() {
+        assert!(MAX_NONCE_ATTEMPTS >= 1_000_000);
     }
 }

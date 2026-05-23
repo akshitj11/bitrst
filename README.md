@@ -17,6 +17,7 @@ Bitcoin from scratch, in Rust.
 - Difficulty adjustment over 2,016-block periods
 - Block timestamp validation (MTP and future-drift limits)
 - `Chain` validation: connect blocks, UTXO checks, orphans, reorg by cumulative work
+- M4.5 workspace hardening: spec-aligned `block_work`, DoS limits, fork-aware MTP, `ChainHandle`, events, block store trait
 - CI for tests and clippy
 
 ## Roadmap
@@ -25,3 +26,5 @@ Bitcoin from scratch, in Rust.
 2. Transactions + UTXO: done
 3. Proof of work: done
 4. Chain validation: done
+5. Workspace hardening (M4.5): done
+6. Script VM: next

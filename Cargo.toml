@@ -11,3 +11,7 @@ members = [
 ]
 
 [dependencies]
+bitrst-core = { path = "crates/bitrst-core" }
+bitrst-miner = { path = "crates/bitrst-miner" }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"

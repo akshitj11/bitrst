@@ -3,6 +3,9 @@
 //! Bitcoin rejects block headers whose timestamps are not strictly greater than
 //! the median time past (MTP) of the prior blocks, and also rejects timestamps
 //! too far in the future relative to network-adjusted clock time.
+//!
+//! MTP uses the median of the previous 11 block timestamps (BIP 34 context).
+//! Future drift is limited to [`MAX_FUTURE_BLOCK_TIME`] ahead of network time.
 
 /// Maximum seconds a block timestamp may lead network-adjusted time.
 pub const MAX_FUTURE_BLOCK_TIME: u32 = 2 * 60 * 60;
