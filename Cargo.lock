@@ -14,6 +14,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -29,7 +30,6 @@ name = "bitrst-miner"
 version = "0.1.0"
 dependencies = [
  "bitrst-core",
- "thiserror",
 ]
 
 [[package]]

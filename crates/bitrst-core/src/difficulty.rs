@@ -115,7 +115,7 @@ fn mul_div_threshold(threshold: [u8; 32], numerator: u64, denominator: u64) -> O
     div_le_by_u64(&product, denominator)
 }
 
-fn div_le_by_u64(input: &[u8], divisor: u64) -> Option<[u8; 32]> {
+pub(crate) fn div_le_by_u64(input: &[u8], divisor: u64) -> Option<[u8; 32]> {
     if divisor == 0 {
         return None;
     }
@@ -145,7 +145,7 @@ fn div_le_by_u64(input: &[u8], divisor: u64) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust_bits, clamp_timespan, DifficultyError, TARGET_TIMESPAN};
+    use super::{adjust_bits, clamp_timespan, div_le_by_u64, DifficultyError, TARGET_TIMESPAN};
     use crate::pow::Target;
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
         let max_target = Target::from_bits(0x1d00_ffff)
             .expect("genesis bits should decode")
             .threshold();
-        let harder_target = super::div_le_by_u64(&max_target, 2).expect("half target should fit");
+        let harder_target = div_le_by_u64(&max_target, 2).expect("half target should fit");
         let prev_bits = Target::from_threshold(harder_target)
             .to_bits()
             .expect("harder target should encode");

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 bitrst-crypto = { path = "../bitrst-crypto" }
 serde = { version = "1", features = ["derive"] }
+thiserror = "1"
 
 [dev-dependencies]
 hex = "0.4"

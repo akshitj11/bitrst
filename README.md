@@ -16,11 +16,12 @@ Bitcoin from scratch, in Rust.
 - First proof-of-work nonce search pass
 - Difficulty adjustment over 2,016-block periods
 - Block timestamp validation (MTP and future-drift limits)
+- `Chain` validation: connect blocks, UTXO checks, orphans, reorg by cumulative work
 - CI for tests and clippy
 
 ## Roadmap
 
 1. Block + SHA256d: done
 2. Transactions + UTXO: done
-3. Proof of work: in progress
-4. Chain validation
+3. Proof of work: done
+4. Chain validation: done
