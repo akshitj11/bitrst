@@ -3,8 +3,8 @@
 use bitrst_crypto::sha256d::sha256d;
 use serde::{Deserialize, Serialize};
 
-use crate::transaction::{write_compact_size, Transaction};
 use crate::merkle::merkle_root;
+use crate::transaction::{write_compact_size, Transaction};
 
 /// A Bitcoin block header in wire-serialization field order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,7 +183,9 @@ mod tests {
 
         assert!(block.header_merkle_root_matches());
         assert_eq!(
-            block.merkle_root().expect("single-tx block should have a root"),
+            block
+                .merkle_root()
+                .expect("single-tx block should have a root"),
             txid
         );
     }
@@ -193,7 +195,10 @@ mod tests {
         let block = Block::coinbase(sample_header(), 1, 50_0000_0000);
         let serialized = block.serialize();
 
-        assert_eq!(serialized.len(), 80 + 1 + block.transactions[0].serialize().len());
+        assert_eq!(
+            serialized.len(),
+            80 + 1 + block.transactions[0].serialize().len()
+        );
         assert_eq!(&serialized[..80], block.header.serialize());
     }
 
