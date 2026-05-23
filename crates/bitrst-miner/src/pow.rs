@@ -10,6 +10,11 @@ pub struct Target {
 }
 
 impl Target {
+    /// Wraps a decoded 32-byte target threshold in internal byte order.
+    pub fn from_threshold(threshold: [u8; 32]) -> Self {
+        Self { threshold }
+    }
+
     /// Decodes a compact Bitcoin proof-of-work target.
     pub fn from_bits(bits: u32) -> Option<Self> {
         let exponent = (bits >> 24) as usize;
@@ -54,6 +59,48 @@ impl Target {
     pub fn meets(&self, hash: &[u8; 32]) -> bool {
         compare_internal_hash(hash, &self.threshold) != Ordering::Greater
     }
+
+    /// Encodes this target as Bitcoin's compact `bits` representation.
+    ///
+    /// Returns `None` when the target is zero or cannot be represented in the
+    /// compact floating-point format used by block headers.
+    pub fn to_bits(&self) -> Option<u32> {
+        let mut size = significant_size(&self.threshold)? as u32;
+        let mut mantissa = if size <= 3 {
+            let mut value = 0u64;
+            for index in 0..size as usize {
+                value |= u64::from(self.threshold[index]) << (8 * index);
+            }
+            (value << (8 * (3 - size))) as u32
+        } else {
+            let offset = (size - 3) as usize;
+            u32::from(self.threshold[offset])
+                | (u32::from(self.threshold[offset + 1]) << 8)
+                | (u32::from(self.threshold[offset + 2]) << 16)
+        };
+
+        // Bitcoin shifts the mantissa and bumps the exponent when bit 23 is set.
+        if mantissa & 0x0080_0000 != 0 {
+            mantissa >>= 8;
+            size += 1;
+        }
+
+        if mantissa > 0x007f_ffff {
+            return None;
+        }
+
+        Some((size << 24) | mantissa)
+    }
+}
+
+fn significant_size(threshold: &[u8; 32]) -> Option<usize> {
+    for index in (0..32).rev() {
+        if threshold[index] != 0 {
+            return Some(index + 1);
+        }
+    }
+
+    None
 }
 
 fn compare_internal_hash(left: &[u8; 32], right: &[u8; 32]) -> Ordering {
@@ -84,6 +131,14 @@ pub fn mine_with_header_bits(header: &mut BlockHeader) -> Option<[u8; 32]> {
 mod tests {
     use super::{mine, mine_with_header_bits, Target};
     use bitrst_core::BlockHeader;
+
+    #[test]
+    fn genesis_compact_bits_roundtrip() {
+        let bits = 0x1d00_ffff;
+        let target = Target::from_bits(bits).expect("genesis bits should decode");
+
+        assert_eq!(target.to_bits(), Some(bits));
+    }
 
     #[test]
     fn decodes_genesis_bits_target() {

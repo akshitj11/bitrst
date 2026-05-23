@@ -14,6 +14,8 @@ Bitcoin from scratch, in Rust.
 - Full `Block` struct with transaction list and Merkle root validation
 - Transaction and UTXO basics
 - First proof-of-work nonce search pass
+- Difficulty adjustment over 2,016-block periods
+- Block timestamp validation (MTP and future-drift limits)
 - CI for tests and clippy
 
 ## Roadmap
