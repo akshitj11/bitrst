@@ -9,7 +9,7 @@ pub mod transaction;
 /// UTXO set types and mutation helpers.
 pub mod utxo;
 
-pub use block::BlockHeader;
+pub use block::{Block, BlockHeader};
 pub use merkle::merkle_root;
 pub use transaction::{Transaction, TxInput, TxOutput};
 pub use utxo::{OutPoint, UtxoSet};

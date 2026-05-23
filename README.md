@@ -11,6 +11,7 @@ Bitcoin from scratch, in Rust.
 - Core, crypto, and miner crates
 - SHA-256d hashing with the Bitcoin genesis header test vector
 - Block header serialization and hashing
+- Full `Block` struct with transaction list and Merkle root validation
 - Transaction and UTXO basics
 - First proof-of-work nonce search pass
 - CI for tests and clippy
@@ -18,6 +19,6 @@ Bitcoin from scratch, in Rust.
 ## Roadmap
 
 1. Block + SHA256d: done
-2. Transactions + UTXO: in progress
+2. Transactions + UTXO: done
 3. Proof of work: in progress
 4. Chain validation

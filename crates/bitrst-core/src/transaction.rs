@@ -1,9 +1,10 @@
 //! Bitcoin transaction primitives.
 
 use bitrst_crypto::sha256d::sha256d;
+use serde::{Deserialize, Serialize};
 
 /// A reference to a previous transaction output plus an unlocking script.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxInput {
     /// Transaction ID being spent, stored in internal byte order.
     pub previous_output: [u8; 32],
@@ -16,7 +17,7 @@ pub struct TxInput {
 }
 
 /// A transaction output containing value and locking script bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxOutput {
     /// Amount locked by this output, in satoshis.
     pub value: u64,
@@ -25,7 +26,7 @@ pub struct TxOutput {
 }
 
 /// A Bitcoin transaction with inputs, outputs, and lock-time.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     /// Transaction version, serialized as a little-endian signed integer.
     pub version: i32,
@@ -89,7 +90,8 @@ impl Transaction {
     }
 }
 
-fn write_compact_size(value: u64, out: &mut Vec<u8>) {
+/// Writes a Bitcoin compact-size prefix for a vector length or script length.
+pub(crate) fn write_compact_size(value: u64, out: &mut Vec<u8>) {
     match value {
         0..=0xfc => out.push(value as u8),
         0xfd..=0xffff => {
