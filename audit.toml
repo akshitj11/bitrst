@@ -1,0 +1,6 @@
+# cargo-audit configuration
+# CVE suppressions belong here only (after security review).
+# Every ignore MUST have a comment and a tracking issue.
+
+[advisories]
+# ignore = ["RUSTSEC-20XX-XXXX"]

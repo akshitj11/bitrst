@@ -20,7 +20,7 @@ Bitcoin from scratch, in Rust.
 - M4.5 workspace hardening: spec-aligned `block_work`, DoS limits, fork-aware MTP, `ChainHandle`, events, block store trait
 - M4.6 chain robustness: reorg snapshot rollback, iterative orphan promotion, `active_hashes`, analytic `serialized_size`
 - Universal-guide chain consensus integration tests (reorg safety, orphans, difficulty, validation, events)
-- CI for tests and clippy
+- CI for tests, clippy, and dependency security (`cargo audit`, `cargo deny`)
 
 ## Testing
 
@@ -29,6 +29,17 @@ cargo test --all --features test-short-period
 ```
 
 With [`.cargo/config.toml`](.cargo/config.toml) in the repo, plain `cargo test` uses the same flags as CI. A full mainnet-interval boundary run (`cargo test --all` without features) is slower but supported.
+
+## Security
+
+Dependency policy and CI behavior: [`docs/dependency-security.md`](docs/dependency-security.md).
+
+Before pushing dependency changes:
+
+```bash
+cargo audit
+cargo deny check
+```
 
 ## Roadmap
 

@@ -2,6 +2,7 @@
 name = "bitrst-miner"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 bitrst-core = { path = "../bitrst-core" }
