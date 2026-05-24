@@ -13,3 +13,15 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features --features test-short-period -- -D warnings
       - run: cargo test --all --features test-short-period
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rustsec/audit-check@v2
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Install cargo-outdated
+        run: cargo install cargo-outdated --locked
+      - name: cargo outdated
+        run: cargo outdated --workspace
