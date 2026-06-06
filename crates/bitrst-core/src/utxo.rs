@@ -14,11 +14,20 @@ pub struct OutPoint {
     pub index: u32,
 }
 
+/// Value and locking script for an unspent output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UtxoEntry {
+    /// Satoshis locked by this output.
+    pub value: u64,
+    /// Locking script (`scriptPubKey`).
+    pub script_pubkey: Vec<u8>,
+}
+
 /// Undo data for reverting a single transaction on the UTXO set during reorg.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxUndo {
     /// Outputs removed from the UTXO set because this transaction spent them.
-    pub removed: Vec<(OutPoint, u64)>,
+    pub removed: Vec<(OutPoint, UtxoEntry)>,
     /// Outputs created by this transaction that must be removed on disconnect.
     pub created: Vec<OutPoint>,
 }
@@ -65,8 +74,8 @@ pub enum UtxoError {
 /// In-memory set of currently unspent transaction outputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UtxoSet {
-    /// Map from outpoints to their spendable value in satoshis.
-    pub entries: HashMap<OutPoint, u64>,
+    /// Map from outpoints to their spendable entries.
+    pub entries: HashMap<OutPoint, UtxoEntry>,
 }
 
 impl UtxoSet {
@@ -82,9 +91,14 @@ impl UtxoSet {
         self.entries.contains_key(outpoint)
     }
 
+    /// Returns the UTXO entry at an outpoint, if it is unspent.
+    pub fn get(&self, outpoint: &OutPoint) -> Option<&UtxoEntry> {
+        self.entries.get(outpoint)
+    }
+
     /// Returns the satoshi value locked at an outpoint, if it is unspent.
-    pub fn get(&self, outpoint: &OutPoint) -> Option<u64> {
-        self.entries.get(outpoint).copied()
+    pub fn get_value(&self, outpoint: &OutPoint) -> Option<u64> {
+        self.get(outpoint).map(|entry| entry.value)
     }
 
     /// Returns true when the transaction is a coinbase reward transaction.
@@ -96,13 +110,6 @@ impl UtxoSet {
 
     /// Validates that a non-coinbase transaction only spends existing UTXOs and
     /// does not create more value than it consumes.
-    ///
-    /// Coinbase transactions skip input checks because they mint new coins.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UtxoError`] when inputs are missing, values overflow, or outputs
-    /// exceed inputs.
     pub fn validate_transaction(&self, tx: &Transaction) -> Result<(), UtxoError> {
         if Self::is_coinbase(tx) {
             return Self::validate_output_sum(tx);
@@ -114,7 +121,7 @@ impl UtxoSet {
                 txid: input.previous_output,
                 index: input.index,
             };
-            let value = self.get(&outpoint).ok_or(UtxoError::MissingInput {
+            let value = self.get_value(&outpoint).ok_or(UtxoError::MissingInput {
                 txid: outpoint.txid,
                 index: outpoint.index,
             })?;
@@ -134,8 +141,6 @@ impl UtxoSet {
     }
 
     /// Applies a transaction to the UTXO set and returns undo data for reorg.
-    ///
-    /// Call [`Self::validate_transaction`] before this function.
     pub fn apply_transaction(&mut self, tx: &Transaction) -> TxUndo {
         let mut removed = Vec::new();
 
@@ -145,8 +150,8 @@ impl UtxoSet {
                     txid: input.previous_output,
                     index: input.index,
                 };
-                if let Some(value) = self.entries.remove(&outpoint) {
-                    removed.push((outpoint, value));
+                if let Some(entry) = self.entries.remove(&outpoint) {
+                    removed.push((outpoint, entry));
                 }
             }
         }
@@ -158,7 +163,13 @@ impl UtxoSet {
                 txid,
                 index: index as u32,
             };
-            self.entries.insert(outpoint, output.value);
+            self.entries.insert(
+                outpoint,
+                UtxoEntry {
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone(),
+                },
+            );
             created.push(outpoint);
         }
 
@@ -170,8 +181,8 @@ impl UtxoSet {
         for outpoint in &undo.created {
             self.entries.remove(outpoint);
         }
-        for (outpoint, value) in &undo.removed {
-            self.entries.insert(*outpoint, *value);
+        for (outpoint, entry) in &undo.removed {
+            self.entries.insert(*outpoint, entry.clone());
         }
     }
 

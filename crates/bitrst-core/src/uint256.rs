@@ -119,8 +119,7 @@ fn set_bit(value: &mut [u8; 32], bit: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{add_u256_le, cmp_le, div_u256_le, work_from_target};
-    use std::cmp::Ordering;
+    use super::{add_u256_le, div_u256_le};
 
     #[test]
     fn div_by_larger_returns_zero() {

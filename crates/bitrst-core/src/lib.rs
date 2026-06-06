@@ -16,6 +16,8 @@ pub mod limits;
 pub mod merkle;
 /// Proof-of-work target decoding and comparison.
 pub mod pow;
+/// Legacy transaction sighash for script verification.
+pub mod sighash;
 /// Block storage trait and in-memory implementation.
 pub mod store;
 /// Block timestamp validation helpers.
@@ -33,6 +35,7 @@ pub use chain_events::{ChainEvent, EvictionReason};
 pub use chain_handle::ChainHandle;
 pub use merkle::merkle_root;
 pub use pow::Target;
+pub use sighash::{sighash_all, SighashError, SIGHASH_ALL};
 pub use store::{BlockStore, MemoryBlockStore, StoreError};
 pub use transaction::{Transaction, TxInput, TxOutput};
-pub use utxo::{OutPoint, TxUndo, UtxoError, UtxoSet};
+pub use utxo::{OutPoint, TxUndo, UtxoEntry, UtxoError, UtxoSet};

@@ -18,10 +18,11 @@ use crate::limits::{
     MAX_BLOCK_SERIALIZED_SIZE, MAX_ORPHAN_BLOCKS, MAX_SCRIPT_SIZE, MAX_TRANSACTIONS_PER_BLOCK,
 };
 use crate::pow::Target;
+use crate::sighash::{sighash_all, SighashError};
 use crate::store::{BlockStore, MemoryBlockStore, StoreError};
 use crate::time::valid_block_time;
 use crate::uint256::cmp_le;
-use crate::utxo::{TxUndo, UtxoError, UtxoSet};
+use crate::utxo::{OutPoint, TxUndo, UtxoError, UtxoSet};
 
 /// Total cumulative proof-of-work on a chain branch (256-bit, compared MSB-first).
 #[derive(Debug, Clone, Copy, Default)]
@@ -182,6 +183,14 @@ pub enum ChainError {
     /// Network-adjusted time must be non-zero for future-drift checks.
     #[error("network time must be greater than zero")]
     InvalidNetworkTime,
+
+    /// Script verification failed for a transaction input.
+    #[error("invalid script")]
+    InvalidScript,
+
+    /// Sighash computation failed during script verification.
+    #[error("sighash error")]
+    Sighash(#[from] SighashError),
 }
 
 #[derive(Debug, Clone)]
@@ -693,9 +702,10 @@ impl Chain {
         block: &Block,
         utxo: &UtxoSet,
     ) -> Result<(), ChainError> {
+        let mut view = utxo.clone();
         let mut spent = HashSet::new();
+
         for tx in &block.transactions {
-            utxo.validate_transaction(tx)?;
             if !UtxoSet::is_coinbase(tx) {
                 for input in &tx.inputs {
                     let key = (input.previous_output, input.index);
@@ -707,6 +717,38 @@ impl Chain {
                     }
                 }
             }
+
+            view.validate_transaction(tx)?;
+
+            if !UtxoSet::is_coinbase(tx) {
+                let mut prev_scripts = Vec::with_capacity(tx.inputs.len());
+                for input in &tx.inputs {
+                    let outpoint = OutPoint {
+                        txid: input.previous_output,
+                        index: input.index,
+                    };
+                    let entry =
+                        view.get(&outpoint)
+                            .ok_or(ChainError::Utxo(UtxoError::MissingInput {
+                                txid: outpoint.txid,
+                                index: outpoint.index,
+                            }))?;
+                    prev_scripts.push(entry.script_pubkey.clone());
+                }
+
+                for (input_index, input) in tx.inputs.iter().enumerate() {
+                    let script_pubkey = &prev_scripts[input_index];
+                    if script_pubkey.is_empty() {
+                        continue;
+                    }
+
+                    let sighash = sighash_all(tx, input_index, &prev_scripts)?;
+                    bitrst_script::verify_script(&input.script_sig, script_pubkey, &sighash)
+                        .map_err(|_| ChainError::InvalidScript)?;
+                }
+            }
+
+            view.apply_transaction(tx);
         }
 
         Ok(())
@@ -1099,5 +1141,155 @@ mod tests {
         ));
         assert_eq!(chain.height(), 12);
         assert_eq!(chain.utxo().len(), 13);
+    }
+
+    #[test]
+    fn connects_block_with_valid_p2pkh_spend() {
+        use bitrst_crypto::hash160::hash160;
+        use bitrst_script::{p2pkh_script_pubkey, p2pkh_script_sig};
+        use secp256k1::{Message, Secp256k1, SecretKey};
+
+        use crate::sighash::sighash_all;
+        use crate::{Transaction, TxInput, TxOutput};
+
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x33; 32]).expect("secret key");
+        let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+        let pubkey_bytes = pk.serialize();
+        let lock_script = p2pkh_script_pubkey(&hash160(&pubkey_bytes));
+
+        let genesis = genesis_block();
+        let genesis_hash = genesis.hash();
+        let mut chain = Chain::new_genesis(genesis, 1231006505).expect("genesis");
+
+        let header1 = BlockHeader {
+            version: 1,
+            prev_blockhash: genesis_hash,
+            merkle_root: [0u8; 32],
+            time: 1231006600,
+            bits: 0x1f00_ffff,
+            nonce: 0,
+        };
+        let mut block1 = Block::coinbase(header1, 1, 50_0000_0000);
+        block1.transactions[0].outputs[0].script_pubkey = lock_script.clone();
+        block1.header.merkle_root = block1.merkle_root().expect("merkle");
+        let block1_target = Target::from_bits(block1.header.bits).expect("bits");
+        mine_header(&mut block1.header, block1_target);
+        chain.connect_block(block1.clone()).expect("fund p2pkh");
+        let funding_txid = block1.transactions[0].txid();
+
+        let mut spend_tx = Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: funding_txid,
+                index: 0,
+                script_sig: Vec::new(),
+                sequence: u32::MAX,
+            }],
+            outputs: vec![TxOutput {
+                value: 49_0000_0000,
+                script_pubkey: Vec::new(),
+            }],
+            lock_time: 0,
+        };
+        let sighash =
+            sighash_all(&spend_tx, 0, std::slice::from_ref(&lock_script)).expect("sighash");
+        let sig = secp.sign_ecdsa(&Message::from_digest(sighash), &sk);
+        let mut sig_bytes = sig.serialize_der().to_vec();
+        sig_bytes.push(0x01);
+        spend_tx.inputs[0].script_sig = p2pkh_script_sig(&sig_bytes, &pubkey_bytes);
+
+        let header2 = BlockHeader {
+            version: 1,
+            prev_blockhash: block1.hash(),
+            merkle_root: [0u8; 32],
+            time: 1231006700,
+            bits: 0x1f00_ffff,
+            nonce: 0,
+        };
+        let mut block2 = Block::coinbase(header2, 2, 50_0000_0000);
+        block2.transactions.push(spend_tx);
+        block2.header.merkle_root = block2.merkle_root().expect("merkle");
+        let block2_target = Target::from_bits(block2.header.bits).expect("bits");
+        mine_header(&mut block2.header, block2_target);
+
+        chain.connect_block(block2).expect("spend p2pkh");
+        assert_eq!(chain.height(), 2);
+        assert_eq!(chain.utxo().len(), 3);
+    }
+
+    #[test]
+    fn rejects_block_with_invalid_p2pkh_script_sig() {
+        use bitrst_crypto::hash160::hash160;
+        use bitrst_script::p2pkh_script_pubkey;
+        use secp256k1::{Secp256k1, SecretKey};
+
+        use crate::{Transaction, TxInput, TxOutput};
+
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x44; 32]).expect("secret key");
+        let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+        let pubkey_bytes = pk.serialize();
+        let lock_script = p2pkh_script_pubkey(&hash160(&pubkey_bytes));
+
+        let genesis = genesis_block();
+        let genesis_hash = genesis.hash();
+        let mut chain = Chain::new_genesis(genesis, 1231006505).expect("genesis");
+
+        let header1 = BlockHeader {
+            version: 1,
+            prev_blockhash: genesis_hash,
+            merkle_root: [0u8; 32],
+            time: 1231006600,
+            bits: 0x1f00_ffff,
+            nonce: 0,
+        };
+        let mut block1 = Block::coinbase(header1, 1, 50_0000_0000);
+        block1.transactions[0].outputs[0].script_pubkey = lock_script;
+        block1.header.merkle_root = block1.merkle_root().expect("merkle");
+        let block1_target = Target::from_bits(block1.header.bits).expect("bits");
+        mine_header(&mut block1.header, block1_target);
+        chain.connect_block(block1.clone()).expect("fund p2pkh");
+        let funding_txid = block1.transactions[0].txid();
+
+        let spend_tx = Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: funding_txid,
+                index: 0,
+                script_sig: vec![0x00],
+                sequence: u32::MAX,
+            }],
+            outputs: vec![TxOutput {
+                value: 49_0000_0000,
+                script_pubkey: Vec::new(),
+            }],
+            lock_time: 0,
+        };
+
+        let header2 = BlockHeader {
+            version: 1,
+            prev_blockhash: block1.hash(),
+            merkle_root: [0u8; 32],
+            time: 1231006700,
+            bits: 0x1f00_ffff,
+            nonce: 0,
+        };
+        let mut block2 = Block::coinbase(header2, 2, 50_0000_0000);
+        block2.transactions.push(spend_tx);
+        block2.header.merkle_root = block2.merkle_root().expect("merkle");
+        let block2_target = Target::from_bits(block2.header.bits).expect("bits");
+        mine_header(&mut block2.header, block2_target);
+
+        let before_height = chain.height();
+        let before_tip = chain.tip_hash();
+        let before_utxo = chain.utxo().len();
+        assert!(matches!(
+            chain.connect_block(block2),
+            Err(ChainError::InvalidScript)
+        ));
+        assert_eq!(chain.height(), before_height);
+        assert_eq!(chain.tip_hash(), before_tip);
+        assert_eq!(chain.utxo().len(), before_utxo);
     }
 }

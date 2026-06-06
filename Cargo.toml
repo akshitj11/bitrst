@@ -9,6 +9,7 @@ members = [
     "crates/bitrst-core",
     "crates/bitrst-crypto",
     "crates/bitrst-miner",
+    "crates/bitrst-script",
 ]
 
 [features]

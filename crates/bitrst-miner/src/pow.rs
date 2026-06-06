@@ -47,7 +47,7 @@ pub fn mine_with_header_bits(header: &mut BlockHeader) -> Result<Option<[u8; 32]
 
 #[cfg(test)]
 mod tests {
-    use super::{mine, mine_with_header_bits, MineError, MAX_NONCE_ATTEMPTS};
+    use super::{mine, mine_with_header_bits, MAX_NONCE_ATTEMPTS};
     use bitrst_core::pow::Target;
     use bitrst_core::BlockHeader;
 
@@ -116,6 +116,6 @@ mod tests {
 
     #[test]
     fn mine_respects_attempt_limit_constant() {
-        assert!(MAX_NONCE_ATTEMPTS >= 1_000_000);
+        const { assert!(MAX_NONCE_ATTEMPTS >= 1_000_000) };
     }
 }

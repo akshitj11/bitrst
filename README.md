@@ -20,6 +20,7 @@ Bitcoin from scratch, in Rust.
 - M4.5 workspace hardening: spec-aligned `block_work`, DoS limits, fork-aware MTP, `ChainHandle`, events, block store trait
 - M4.6 chain robustness: reorg snapshot rollback, iterative orphan promotion, `active_hashes`, analytic `serialized_size`
 - Universal-guide chain consensus integration tests (reorg safety, orphans, difficulty, validation, events)
+- M5 Script VM: P2PKH script verification, legacy sighash, `bitrst-script` stack interpreter
 - CI for tests, clippy, and dependency security (`cargo audit`, `cargo deny`)
 
 ## Testing
@@ -49,4 +50,5 @@ cargo deny check
 4. Chain validation: done
 5. Workspace hardening (M4.5): done
 6. Chain robustness (M4.6): done
-7. Script VM: next
+7. Script VM (M5): done
+8. Wallet: next
