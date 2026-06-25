@@ -58,6 +58,8 @@ version = "0.1.0"
 dependencies = [
  "bitrst-core",
  "bitrst-miner",
+ "bitrst-script",
+ "bitrst-wallet",
  "clap",
  "hex",
 ]
