@@ -1,6 +1,6 @@
 //! ECDSA signature verification for Bitcoin script checks.
 
-use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1};
+use secp256k1::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey};
 
 /// Errors from ECDSA verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,9 +37,26 @@ pub fn verify_der_signature(
         .map_err(|_| EcdsaVerifyError::VerificationFailed)
 }
 
+/// Signs a 32-byte Bitcoin sighash and appends the sighash type byte.
+///
+/// The returned bytes are DER-encoded ECDSA followed by `sighash_type`, matching
+/// the legacy script format consumed by `OP_CHECKSIG`.
+pub fn sign_der_with_hashtype(
+    secret_key: &SecretKey,
+    sighash: &[u8; 32],
+    sighash_type: u8,
+) -> Vec<u8> {
+    let secp = Secp256k1::signing_only();
+    let message = Message::from_digest(*sighash);
+    let signature = secp.sign_ecdsa(&message, secret_key);
+    let mut out = signature.serialize_der().to_vec();
+    out.push(sighash_type);
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::verify_der_signature;
+    use super::{sign_der_with_hashtype, verify_der_signature};
     use secp256k1::{Message, Secp256k1, SecretKey};
 
     #[test]
@@ -54,6 +71,19 @@ mod tests {
         der_with_type.push(0x01);
 
         verify_der_signature(&der_with_type, &pk.serialize(), &sighash).expect("valid sig");
+    }
+
+    #[test]
+    fn signs_der_signature_with_hashtype_byte() {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[0x03; 32]).expect("secret key");
+        let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+        let sighash = [0xef; 32];
+
+        let signature = sign_der_with_hashtype(&sk, &sighash, 0x01);
+
+        assert_eq!(signature.last(), Some(&0x01));
+        verify_der_signature(&signature, &pk.serialize(), &sighash).expect("valid signature");
     }
 
     #[test]

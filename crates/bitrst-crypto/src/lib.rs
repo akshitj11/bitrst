@@ -1,5 +1,7 @@
 //! Cryptographic primitives used by bitrst.
 
+/// Base58Check encoding for Bitcoin addresses.
+pub mod base58;
 /// ECDSA verification for script checks.
 pub mod ecdsa;
 /// HASH160 for P2PKH addresses and scripts.
