@@ -21,6 +21,8 @@ Bitcoin from scratch, in Rust.
 - M4.6 chain robustness: reorg snapshot rollback, iterative orphan promotion, `active_hashes`, analytic `serialized_size`
 - Universal-guide chain consensus integration tests (reorg safety, orphans, difficulty, validation, events)
 - M5 Script VM: P2PKH script verification, legacy sighash, `bitrst-script` stack interpreter
+- M6 Wallet: secp256k1 key generation, Base58Check P2PKH addresses, P2PKH signing, and active-chain UTXO tracking
+- Wallet integration tests for signed local spends and reorg-safe event handling
 - CI for tests, clippy, and dependency security (`cargo audit`, `cargo deny`)
 
 ## Testing
@@ -29,7 +31,7 @@ Bitcoin from scratch, in Rust.
 cargo test --all --features test-short-period
 ```
 
-With [`.cargo/config.toml`](.cargo/config.toml) in the repo, plain `cargo test` uses the same flags as CI. A full mainnet-interval boundary run (`cargo test --all` without features) is slower but supported.
+Use `cargo ci-fast` for the same fast test command with locked dependencies. A full mainnet-interval boundary run (`cargo test --all` without features) is slower but supported.
 
 ## Security
 
@@ -51,4 +53,5 @@ cargo deny check
 5. Workspace hardening (M4.5): done
 6. Chain robustness (M4.6): done
 7. Script VM (M5): done
-8. Wallet: next
+8. Wallet (M6): done
+9. P2P networking: next
