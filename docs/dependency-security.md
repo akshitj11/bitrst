@@ -28,7 +28,7 @@ bitrst/
 
 | Tool | Checks against | Blocks CI? | When |
 |------|----------------|------------|------|
-| `cargo audit` | RustSec CVE database | Yes | Every push to `main`; PRs that touch deps |
+| `cargo audit` | RustSec CVE database | Yes | Every push to `main`; every PR |
 | `cargo deny` | Licenses, duplicates, banned crates, sources | Yes (except advisories matrix leg — warn only) | Same as audit |
 | `cargo outdated` | Latest versions on crates.io | No | Weekly (Mon 09:00 UTC) + manual dispatch |
 
@@ -39,7 +39,7 @@ bitrst/
 ### `security.yml`
 
 - **Push to `main`:** full security run (no path filter).
-- **Pull requests:** only when `Cargo.toml`, `Cargo.lock`, `deny.toml`, `audit.toml`, or `security.yml` change.
+- **Pull requests:** full security run for every PR, because wallet and consensus logic can make an existing dependency newly security-critical.
 
 Jobs:
 
@@ -68,6 +68,9 @@ CVE suppressions belong **here only**, after review. Every `ignore` entry needs 
 ## Local checks (before push)
 
 ```bash
+./scripts/ci-local.sh
+
+# Or run the dependency checks directly:
 cargo audit
 cargo deny check advisories
 cargo deny check bans

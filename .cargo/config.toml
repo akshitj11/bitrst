@@ -1,2 +1,2 @@
 [alias]
-test = "test --all --features test-short-period"
+ci-fast = "test --locked --all --features test-short-period"

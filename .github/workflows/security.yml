@@ -4,12 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-      - 'deny.toml'
-      - 'audit.toml'
-      - '.github/workflows/security.yml'
 
 jobs:
   audit:
