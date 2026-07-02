@@ -1,5 +1,7 @@
 # Architecture
 
+Visual diagram: see [README Architecture section](README.md#architecture).
+
 This repo starts as a small Rust workspace for building Bitcoin concepts in layers.
 
 - `bitrst-core`: blocks, transactions, UTXO set, consensus rules, and chain validation

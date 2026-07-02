@@ -5,6 +5,67 @@
 
 Bitcoin from scratch, in Rust.
 
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph cli [bitrst CLI]
+    Main[src/main.rs]
+  end
+
+  subgraph wallet_layer [bitrst-wallet]
+    Wallet[Wallet + UTXO watch]
+    Sign[sign_p2pkh_input]
+    Addr[P2PKH Address]
+  end
+
+  subgraph core [bitrst-core]
+    Handle[ChainHandle]
+    Chain[Chain connect / reorg / orphans]
+    Validate[Validate: size PoW Merkle coinbase time bits UTXO script]
+    Utxo[UtxoSet]
+    Events[ChainEvent log]
+    Store[BlockStore / MemoryBlockStore]
+  end
+
+  subgraph script [bitrst-script]
+    VM[P2PKH stack interpreter]
+  end
+
+  subgraph crypto [bitrst-crypto]
+    Hash[SHA256d HASH160 Base58 ECDSA]
+  end
+
+  subgraph miner [bitrst-miner]
+    Mine[nonce search]
+  end
+
+  subgraph future [planned M7]
+    Net[bitrst-net P2P]
+  end
+
+  Main --> Handle
+  Wallet --> Sign
+  Wallet --> Handle
+  Sign --> Hash
+  Sign --> VM
+  Addr --> Hash
+  Handle --> Chain
+  Chain --> Validate
+  Validate --> Utxo
+  Validate --> VM
+  Validate --> Hash
+  Chain --> Events
+  Chain --> Store
+  VM --> Hash
+  Mine --> Chain
+  Net -.-> Handle
+```
+
+![bitrst architecture](docs/architecture-diagram.mersketch.svg)
+
+Diagram source: [`docs/architecture-diagram.mmd`](docs/architecture-diagram.mmd) · Made with [Mersketch](https://github.com/akshitj11/Mersketch)
+
 ## Current scope
 
 - Workspace scaffold
