@@ -6,3 +6,6 @@
 pub mod constants;
 
 pub use constants::Network;
+/// Networking error types.
+pub mod error;
+pub use error::NetError;
