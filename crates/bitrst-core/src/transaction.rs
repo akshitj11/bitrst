@@ -3,7 +3,10 @@
 use bitrst_crypto::sha256d::sha256d;
 use serde::{Deserialize, Serialize};
 
-use crate::limits::{MAX_SCRIPT_SIZE, MAX_TRANSACTIONS_PER_BLOCK};
+use crate::limits::{
+    MAX_SCRIPT_SIZE, MAX_TRANSACTION_INPUTS, MAX_TRANSACTION_OUTPUTS,
+    MAX_TRANSACTION_SERIALIZED_SIZE,
+};
 use crate::wire::{DecodeError, WireReader};
 
 /// A reference to a previous transaction output plus an unlocking script.
@@ -92,6 +95,13 @@ impl Transaction {
     /// Counts and scripts are bounded before allocation, non-canonical
     /// CompactSize values are rejected, and trailing bytes are not accepted.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() > MAX_TRANSACTION_SERIALIZED_SIZE {
+            return Err(DecodeError::LimitExceeded {
+                context: "transaction size",
+                actual: bytes.len() as u64,
+                limit: MAX_TRANSACTION_SERIALIZED_SIZE,
+            });
+        }
         let mut reader = WireReader::new(bytes);
         let transaction = Self::decode_from(&mut reader)?;
         reader.finish("transaction")?;
@@ -101,7 +111,7 @@ impl Transaction {
     pub(crate) fn decode_from(reader: &mut WireReader<'_>) -> Result<Self, DecodeError> {
         let version = reader.read_i32("transaction version")?;
         let input_count =
-            reader.read_limited_len("transaction input count", MAX_TRANSACTIONS_PER_BLOCK)?;
+            reader.read_limited_len("transaction input count", MAX_TRANSACTION_INPUTS)?;
         let mut inputs = Vec::with_capacity(input_count);
         for _ in 0..input_count {
             let mut previous_output = [0; 32];
@@ -118,7 +128,7 @@ impl Transaction {
             });
         }
         let output_count =
-            reader.read_limited_len("transaction output count", MAX_TRANSACTIONS_PER_BLOCK)?;
+            reader.read_limited_len("transaction output count", MAX_TRANSACTION_OUTPUTS)?;
         let mut outputs = Vec::with_capacity(output_count);
         for _ in 0..output_count {
             let value = reader.read_u64("output value")?;
@@ -203,6 +213,9 @@ pub(crate) fn write_compact_size(value: u64, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{Transaction, TxInput, TxOutput};
+    use crate::limits::{
+        MAX_TRANSACTION_INPUTS, MAX_TRANSACTION_OUTPUTS, MAX_TRANSACTION_SERIALIZED_SIZE,
+    };
     use crate::wire::DecodeError;
 
     #[test]
@@ -314,5 +327,33 @@ mod tests {
             Transaction::deserialize(&encoded),
             Err(DecodeError::NonCanonicalCompactSize { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_oversized_transaction_before_parsing() {
+        let encoded = vec![0; MAX_TRANSACTION_SERIALIZED_SIZE + 1];
+        assert!(matches!(
+            Transaction::deserialize(&encoded),
+            Err(DecodeError::LimitExceeded {
+                context: "transaction size",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_output_count_before_allocation() {
+        let mut encoded = vec![1, 0, 0, 0, 0];
+        encoded.push(0xfd);
+        encoded.extend_from_slice(&((MAX_TRANSACTION_OUTPUTS as u16) + 1).to_le_bytes());
+        assert!(matches!(
+            Transaction::deserialize(&encoded),
+            Err(DecodeError::LimitExceeded {
+                context: "transaction output count",
+                limit: MAX_TRANSACTION_OUTPUTS,
+                ..
+            })
+        ));
+        assert_ne!(MAX_TRANSACTION_INPUTS, 0);
     }
 }
