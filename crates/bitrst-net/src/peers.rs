@@ -16,7 +16,7 @@ use crate::error::NetError;
 use crate::handshake::{ConnectionDirection, HandshakeConfig};
 use crate::inbound_capacity::InboundCapacity;
 use crate::message::{InvType, InventoryVector, Message};
-use crate::peer::{spawn_peer, PeerCommand, PeerEvent};
+use crate::peer::{spawn_peer, PeerCommand, PeerContext, PeerEvent};
 use crate::seeds::SeedStrategy;
 
 /// Configuration for the peer manager.
@@ -48,9 +48,16 @@ impl PeerManagerConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerLifecycle {
+    Handshaking,
+    Ready,
+}
+
 struct PeerEntry {
     command_tx: mpsc::Sender<PeerCommand>,
     direction: ConnectionDirection,
+    state: PeerLifecycle,
     _task: JoinHandle<()>,
 }
 
@@ -98,7 +105,7 @@ impl PeerManager {
         }
     }
 
-    /// Starts listening for inbound peers.
+    /// Starts listening for inbound connections.
     ///
     /// # Errors
     ///
@@ -134,14 +141,16 @@ impl PeerManager {
                 let height = chain.height().unwrap_or(0) as i32;
                 let (command_tx, task) = spawn_peer(
                     stream,
-                    addr,
-                    ConnectionDirection::Inbound,
-                    network,
-                    chain.clone(),
-                    config,
-                    height,
-                    event_tx.clone(),
-                    Some(guard),
+                    PeerContext::new(
+                        addr,
+                        ConnectionDirection::Inbound,
+                        network,
+                        chain.clone(),
+                        config,
+                        height,
+                        event_tx.clone(),
+                    )
+                    .with_inbound_guard(guard),
                 );
                 let registration = PeerRegistration {
                     addr,
@@ -149,8 +158,8 @@ impl PeerManager {
                     command_tx,
                     task,
                 };
-                if let Err(error) = register_tx.try_send(registration) {
-                    error.into_inner().task.abort();
+                if register_tx.send(registration).await.is_err() {
+                    break;
                 }
             }
         });
@@ -177,20 +186,22 @@ impl PeerManager {
         let height = self.chain.height().unwrap_or(0) as i32;
         let (command_tx, task) = spawn_peer(
             stream,
-            addr,
-            ConnectionDirection::Outbound,
-            self.config.network,
-            self.chain.clone(),
-            config,
-            height,
-            self.event_tx.clone(),
-            None,
+            PeerContext::new(
+                addr,
+                ConnectionDirection::Outbound,
+                self.config.network,
+                self.chain.clone(),
+                config,
+                height,
+                self.event_tx.clone(),
+            ),
         );
         self.peers.insert(
             addr,
             PeerEntry {
                 command_tx,
                 direction: ConnectionDirection::Outbound,
+                state: PeerLifecycle::Handshaking,
                 _task: task,
             },
         );
@@ -212,7 +223,7 @@ impl PeerManager {
         Err(NetError::Io("no seeds connected"))
     }
 
-    /// Broadcasts inventory to all connected peers except `origin`.
+    /// Broadcasts inventory to ready peers except `origin`.
     ///
     /// # Errors
     ///
@@ -227,7 +238,7 @@ impl PeerManager {
         }
         let message = Message::inv(items);
         for (addr, entry) in &self.peers {
-            if origin == Some(*addr) {
+            if origin == Some(*addr) || entry.state != PeerLifecycle::Ready {
                 continue;
             }
             entry
@@ -254,8 +265,21 @@ impl PeerManager {
             if tokio::time::Instant::now() >= deadline {
                 break;
             }
-            self.process_events().await?;
+            self.poll().await?;
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
+    /// Drains one pass of registrations and all currently queued peer events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError`] when inventory relay fails.
+    pub async fn poll(&mut self) -> Result<(), NetError> {
+        self.process_registrations();
+        while let Ok(event) = self.event_rx.try_recv() {
+            self.handle_event(event).await?;
         }
         Ok(())
     }
@@ -266,25 +290,31 @@ impl PeerManager {
     ///
     /// Returns [`NetError`] when inventory relay fails.
     pub async fn process_events(&mut self) -> Result<(), NetError> {
-        self.process_registrations();
-        while let Ok(event) = self.event_rx.try_recv() {
-            match event {
-                PeerEvent::Announce { addr, items } => {
-                    let filtered: Vec<_> = items
-                        .into_iter()
-                        .filter(|item| item.inv_type == InvType::Block)
-                        .collect();
-                    self.relay_inventory(Some(addr), filtered).await?;
+        self.poll().await
+    }
+
+    async fn handle_event(&mut self, event: PeerEvent) -> Result<(), NetError> {
+        match event {
+            PeerEvent::Announce { addr, items } => {
+                let filtered: Vec<_> = items
+                    .into_iter()
+                    .filter(|item| item.inv_type == InvType::Block)
+                    .collect();
+                self.relay_inventory(Some(addr), filtered).await?;
+            }
+            PeerEvent::Ready { addr } => {
+                if let Some(entry) = self.peers.get_mut(&addr) {
+                    entry.state = PeerLifecycle::Ready;
                 }
-                PeerEvent::HandshakeComplete { .. } => {}
-                PeerEvent::Disconnected { addr, .. } => {
-                    if let Some(entry) = self.peers.remove(&addr) {
-                        if entry.direction == ConnectionDirection::Outbound {
-                            self.outbound_count = self.outbound_count.saturating_sub(1);
-                        }
+            }
+            PeerEvent::Disconnected { addr, .. } => {
+                if let Some(entry) = self.peers.remove(&addr) {
+                    if entry.direction == ConnectionDirection::Outbound {
+                        self.outbound_count = self.outbound_count.saturating_sub(1);
                     }
                 }
             }
+            PeerEvent::RegistrationRejected { .. } => {}
         }
         Ok(())
     }
@@ -295,6 +325,10 @@ impl PeerManager {
                 && self.outbound_count >= self.config.max_outbound
             {
                 registration.task.abort();
+                let _ = self.event_tx.try_send(PeerEvent::RegistrationRejected {
+                    addr: registration.addr,
+                    error: NetError::ConnectionLimitReached,
+                });
                 continue;
             }
             if registration.direction == ConnectionDirection::Outbound {
@@ -305,16 +339,26 @@ impl PeerManager {
                 PeerEntry {
                     command_tx: registration.command_tx,
                     direction: registration.direction,
+                    state: PeerLifecycle::Handshaking,
                     _task: registration.task,
                 },
             );
         }
     }
 
-    /// Returns the number of tracked peers.
+    /// Returns the number of tracked peers in any lifecycle state.
     #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers.len()
+    }
+
+    /// Returns the number of peers that completed handshake and can receive relays.
+    #[must_use]
+    pub fn ready_peer_count(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|entry| entry.state == PeerLifecycle::Ready)
+            .count()
     }
 
     /// Returns the number of reserved inbound connection slots.
@@ -339,7 +383,7 @@ mod tests {
     use crate::framing::read_message;
     use crate::handshake::{ConnectionDirection, HandshakeConfig};
     use crate::message::{InvType, InventoryVector};
-    use crate::peer::spawn_peer;
+    use crate::peer::{spawn_peer, PeerContext};
     use crate::seeds::SeedStrategy;
     use crate::testutil::{genesis_block, NETWORK_TIME};
 
@@ -379,25 +423,29 @@ mod tests {
         let (event_tx, _event_rx) = event_channel();
         let (_cmd, handle) = spawn_peer(
             stream,
-            format!("127.0.0.1:{port}").parse().expect("addr"),
-            ConnectionDirection::Outbound,
-            Network::Testnet,
-            chain,
-            HandshakeConfig {
-                local_nonce: 99,
-                timeout: Duration::from_secs(5),
-            },
-            0,
-            event_tx,
-            None,
+            PeerContext::new(
+                format!("127.0.0.1:{port}").parse().expect("addr"),
+                ConnectionDirection::Outbound,
+                Network::Testnet,
+                chain,
+                HandshakeConfig {
+                    local_nonce: 99,
+                    timeout: Duration::from_secs(5),
+                },
+                0,
+                event_tx,
+            ),
         );
 
         manager
-            .drive_until(|manager| manager.peer_count() > 0, Duration::from_secs(5))
+            .drive_until(
+                |manager| manager.ready_peer_count() > 0,
+                Duration::from_secs(5),
+            )
             .await
             .expect("drive");
 
-        assert_eq!(manager.peer_count(), 1);
+        assert_eq!(manager.ready_peer_count(), 1);
         handle.abort();
     }
 
@@ -430,7 +478,10 @@ mod tests {
         client_handshake(&mut stream, 77).await;
 
         manager
-            .drive_until(|manager| manager.peer_count() > 0, Duration::from_secs(5))
+            .drive_until(
+                |manager| manager.ready_peer_count() > 0,
+                Duration::from_secs(5),
+            )
             .await
             .expect("drive");
 
@@ -460,6 +511,80 @@ mod tests {
             }
             other => panic!("expected inv payload, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn relay_skips_peers_until_ready() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+
+        let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
+        let mut manager = PeerManager::new(
+            chain,
+            PeerManagerConfig {
+                network: Network::Testnet,
+                listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+                max_inbound: 4,
+                max_outbound: 4,
+                seeds: SeedStrategy::Fixed(vec![]),
+            },
+        );
+        manager.start_listener().await.expect("listen");
+        manager.spawn_acceptor();
+
+        sleep(Duration::from_millis(20)).await;
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .expect("connect");
+        write_message_version_only(&mut stream, 88).await;
+
+        manager
+            .drive_until(|manager| manager.peer_count() > 0, Duration::from_secs(5))
+            .await
+            .expect("drive");
+        assert_eq!(manager.ready_peer_count(), 0);
+
+        manager
+            .relay_inventory(
+                None,
+                vec![InventoryVector {
+                    inv_type: InvType::Block,
+                    hash: [0x11; 32],
+                }],
+            )
+            .await
+            .expect("relay");
+
+        let read_result = tokio::time::timeout(
+            Duration::from_millis(300),
+            read_message(&mut stream, Network::Testnet),
+        )
+        .await;
+        match read_result {
+            Err(_) => {}
+            Ok(Ok(message)) => assert_ne!(
+                message.command, "inv",
+                "inv must not be sent before handshake completes"
+            ),
+            Ok(Err(_)) => {}
+        }
+    }
+
+    async fn write_message_version_only(stream: &mut TcpStream, nonce: u64) {
+        use crate::codec::default_version_message;
+        use crate::framing::write_message;
+        use crate::message::Message;
+
+        write_message(
+            stream,
+            Network::Testnet,
+            &Message::version(default_version_message(nonce, 1, 0)),
+        )
+        .await
+        .expect("write version");
     }
 
     async fn client_handshake(stream: &mut TcpStream, nonce: u64) {

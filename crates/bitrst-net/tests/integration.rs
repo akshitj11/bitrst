@@ -9,7 +9,7 @@ use bitrst_net::envelope::MessageHeader;
 use bitrst_net::framing::{read_message, write_message};
 use bitrst_net::handshake::{ConnectionDirection, HandshakeConfig};
 use bitrst_net::message::{InvType, InventoryVector, Message, MessagePayload};
-use bitrst_net::peer::{spawn_peer, PeerCommand};
+use bitrst_net::peer::{spawn_peer, PeerCommand, PeerContext};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -153,17 +153,18 @@ async fn two_node_block_relay_updates_follower_chain() {
         let (stream, peer_addr) = listener.accept().await.expect("accept");
         let (cmd_tx, handle) = spawn_peer(
             stream,
-            peer_addr,
-            ConnectionDirection::Inbound,
-            Network::Testnet,
-            leader_chain,
-            HandshakeConfig {
-                local_nonce: 100,
-                timeout: Duration::from_secs(5),
-            },
-            0,
-            leader_event_tx,
-            None,
+            PeerContext::new(
+                peer_addr,
+                ConnectionDirection::Inbound,
+                Network::Testnet,
+                leader_chain,
+                HandshakeConfig {
+                    local_nonce: 100,
+                    timeout: Duration::from_secs(5),
+                },
+                0,
+                leader_event_tx,
+            ),
         );
         (cmd_tx, handle)
     });
@@ -173,17 +174,18 @@ async fn two_node_block_relay_updates_follower_chain() {
     let (follower_event_tx, mut follower_events) = mpsc::channel(MAX_PEER_EVENTS);
     let (follower_cmd, follower_handle) = spawn_peer(
         stream,
-        addr,
-        ConnectionDirection::Outbound,
-        Network::Testnet,
-        follower_chain.clone(),
-        HandshakeConfig {
-            local_nonce: 200,
-            timeout: Duration::from_secs(5),
-        },
-        0,
-        follower_event_tx,
-        None,
+        PeerContext::new(
+            addr,
+            ConnectionDirection::Outbound,
+            Network::Testnet,
+            follower_chain.clone(),
+            HandshakeConfig {
+                local_nonce: 200,
+                timeout: Duration::from_secs(5),
+            },
+            0,
+            follower_event_tx,
+        ),
     );
 
     let _ = tokio::time::timeout(Duration::from_secs(5), leader_events.recv())
@@ -232,17 +234,18 @@ async fn inv_getdata_block_wire_flow_updates_server_chain() {
         let (stream, peer_addr) = listener.accept().await.expect("accept");
         let (cmd_tx, handle) = spawn_peer(
             stream,
-            peer_addr,
-            ConnectionDirection::Inbound,
-            Network::Testnet,
-            server_chain,
-            HandshakeConfig {
-                local_nonce: 301,
-                timeout: Duration::from_secs(5),
-            },
-            0,
-            server_event_tx,
-            None,
+            PeerContext::new(
+                peer_addr,
+                ConnectionDirection::Inbound,
+                Network::Testnet,
+                server_chain,
+                HandshakeConfig {
+                    local_nonce: 301,
+                    timeout: Duration::from_secs(5),
+                },
+                0,
+                server_event_tx,
+            ),
         );
         (cmd_tx, handle)
     });

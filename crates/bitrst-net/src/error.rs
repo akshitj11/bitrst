@@ -64,7 +64,7 @@ pub enum NetError {
     #[error("outbound queue full")]
     OutboundQueueFull,
 
-    /// The manager event queue is full and a non-critical event was dropped.
+    /// The manager event queue is full.
     #[error("peer event queue full")]
     EventQueueFull,
 
