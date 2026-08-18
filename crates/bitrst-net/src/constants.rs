@@ -31,6 +31,12 @@ pub const DEFAULT_MAX_INBOUND: usize = 8;
 /// Default maximum simultaneous outbound peers.
 pub const DEFAULT_MAX_OUTBOUND: usize = 8;
 
+/// Maximum pending peer events buffered by the manager.
+pub const MAX_PEER_EVENTS: usize = 256;
+
+/// Maximum pending inbound peer registrations buffered by the manager.
+pub const MAX_PEER_REGISTRATIONS: usize = 32;
+
 /// Handshake timeout for version/verack exchange.
 #[cfg(feature = "test-short-period")]
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);

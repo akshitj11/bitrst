@@ -2,21 +2,22 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use bitrst_core::ChainHandle;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::constants::{Network, DEFAULT_MAX_INBOUND, DEFAULT_MAX_OUTBOUND};
+use crate::constants::{
+    Network, DEFAULT_MAX_INBOUND, DEFAULT_MAX_OUTBOUND, MAX_PEER_EVENTS, MAX_PEER_REGISTRATIONS,
+};
 use crate::error::NetError;
 use crate::handshake::{ConnectionDirection, HandshakeConfig};
+use crate::inbound_capacity::InboundCapacity;
 use crate::message::{InvType, InventoryVector, Message};
 use crate::peer::{spawn_peer, PeerCommand, PeerEvent};
 use crate::seeds::SeedStrategy;
-
-static NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Configuration for the peer manager.
 #[derive(Debug, Clone)]
@@ -68,18 +69,20 @@ pub struct PeerManager {
     peers: HashMap<SocketAddr, PeerEntry>,
     listener: Option<TcpListener>,
     accept_handle: Option<JoinHandle<()>>,
-    event_tx: mpsc::UnboundedSender<PeerEvent>,
-    event_rx: mpsc::UnboundedReceiver<PeerEvent>,
-    register_tx: mpsc::UnboundedSender<PeerRegistration>,
-    register_rx: mpsc::UnboundedReceiver<PeerRegistration>,
+    event_tx: mpsc::Sender<PeerEvent>,
+    event_rx: mpsc::Receiver<PeerEvent>,
+    register_tx: mpsc::Sender<PeerRegistration>,
+    register_rx: mpsc::Receiver<PeerRegistration>,
+    inbound_capacity: Arc<InboundCapacity>,
 }
 
 impl PeerManager {
     /// Creates a peer manager bound to `config` and sharing `chain`.
     #[must_use]
     pub fn new(chain: ChainHandle, config: PeerManagerConfig) -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let (register_tx, register_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel(MAX_PEER_EVENTS);
+        let (register_tx, register_rx) = mpsc::channel(MAX_PEER_REGISTRATIONS);
+        let inbound_capacity = InboundCapacity::new(config.max_inbound);
         Self {
             chain,
             config,
@@ -91,6 +94,7 @@ impl PeerManager {
             event_rx,
             register_tx,
             register_rx,
+            inbound_capacity,
         }
     }
 
@@ -116,15 +120,17 @@ impl PeerManager {
         let register_tx = self.register_tx.clone();
         let chain = self.chain.clone();
         let network = self.config.network;
+        let inbound_capacity = Arc::clone(&self.inbound_capacity);
         let accept_handle = tokio::spawn(async move {
             loop {
                 let Ok((stream, addr)) = listener.accept().await else {
                     break;
                 };
-                let config = HandshakeConfig {
-                    local_nonce: next_nonce(),
-                    ..HandshakeConfig::default()
+                let Some(guard) = inbound_capacity.try_acquire() else {
+                    drop(stream);
+                    continue;
                 };
+                let config = HandshakeConfig::default();
                 let height = chain.height().unwrap_or(0) as i32;
                 let (command_tx, task) = spawn_peer(
                     stream,
@@ -135,13 +141,17 @@ impl PeerManager {
                     config,
                     height,
                     event_tx.clone(),
+                    Some(guard),
                 );
-                let _ = register_tx.send(PeerRegistration {
+                let registration = PeerRegistration {
                     addr,
                     direction: ConnectionDirection::Inbound,
                     command_tx,
                     task,
-                });
+                };
+                if let Err(error) = register_tx.try_send(registration) {
+                    error.into_inner().task.abort();
+                }
             }
         });
         self.accept_handle = Some(accept_handle);
@@ -163,10 +173,7 @@ impl PeerManager {
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .map_err(|_| NetError::Io("connect"))?;
-        let config = HandshakeConfig {
-            local_nonce: next_nonce(),
-            ..HandshakeConfig::default()
-        };
+        let config = HandshakeConfig::default();
         let height = self.chain.height().unwrap_or(0) as i32;
         let (command_tx, task) = spawn_peer(
             stream,
@@ -177,6 +184,7 @@ impl PeerManager {
             config,
             height,
             self.event_tx.clone(),
+            None,
         );
         self.peers.insert(
             addr,
@@ -231,6 +239,27 @@ impl PeerManager {
         Ok(())
     }
 
+    /// Drains registrations and events until `condition` holds or `timeout` elapses.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError`] when inventory relay fails.
+    pub async fn drive_until(
+        &mut self,
+        mut condition: impl FnMut(&Self) -> bool,
+        timeout: std::time::Duration,
+    ) -> Result<(), NetError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !condition(self) {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            self.process_events().await?;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        Ok(())
+    }
+
     /// Drains pending peer events and relays block inventory.
     ///
     /// # Errors
@@ -262,79 +291,63 @@ impl PeerManager {
 
     fn process_registrations(&mut self) {
         while let Ok(registration) = self.register_rx.try_recv() {
-            let allowed = match registration.direction {
-                ConnectionDirection::Inbound => self.inbound_count() < self.config.max_inbound,
-                ConnectionDirection::Outbound => self.outbound_count < self.config.max_outbound,
-            };
-            if allowed {
-                if registration.direction == ConnectionDirection::Outbound {
-                    self.outbound_count += 1;
-                }
-                self.peers.insert(
-                    registration.addr,
-                    PeerEntry {
-                        command_tx: registration.command_tx,
-                        direction: registration.direction,
-                        _task: registration.task,
-                    },
-                );
-            } else {
+            if registration.direction == ConnectionDirection::Outbound
+                && self.outbound_count >= self.config.max_outbound
+            {
                 registration.task.abort();
+                continue;
             }
+            if registration.direction == ConnectionDirection::Outbound {
+                self.outbound_count += 1;
+            }
+            self.peers.insert(
+                registration.addr,
+                PeerEntry {
+                    command_tx: registration.command_tx,
+                    direction: registration.direction,
+                    _task: registration.task,
+                },
+            );
         }
     }
 
-    fn inbound_count(&self) -> usize {
-        self.peers
-            .values()
-            .filter(|entry| entry.direction == ConnectionDirection::Inbound)
-            .count()
-    }
-
-    /// Returns the number of tracked outbound peers.
+    /// Returns the number of tracked peers.
     #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peers.len()
     }
-}
 
-fn next_nonce() -> u64 {
-    NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    /// Returns the number of reserved inbound connection slots.
+    #[must_use]
+    pub fn inbound_reserved(&self) -> usize {
+        self.inbound_capacity.reserved()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use bitrst_core::{Block, BlockHeader, ChainHandle, Target};
+    use bitrst_core::ChainHandle;
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
     use tokio::time::sleep;
 
     use super::{PeerManager, PeerManagerConfig};
+    use crate::codec::{decode_inv, encode_inv};
     use crate::constants::Network;
+    use crate::framing::read_message;
     use crate::handshake::{ConnectionDirection, HandshakeConfig};
     use crate::message::{InvType, InventoryVector};
     use crate::peer::spawn_peer;
     use crate::seeds::SeedStrategy;
+    use crate::testutil::{genesis_block, NETWORK_TIME};
 
-    const NETWORK_TIME: u32 = 1_231_006_505;
-    const TEST_BITS: u32 = 0x1f00_ffff;
-
-    fn genesis_block() -> Block {
-        let header = BlockHeader {
-            version: 1,
-            prev_blockhash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            time: NETWORK_TIME,
-            bits: TEST_BITS,
-            nonce: 0,
-        };
-        let mut block = Block::coinbase(header, 0, 50_0000_0000);
-        let target = Target::from_bits(TEST_BITS).expect("bits");
-        while !target.meets(&block.header.hash()) {
-            block.header.nonce = block.header.nonce.wrapping_add(1);
-        }
-        block
+    fn event_channel() -> (
+        tokio::sync::mpsc::Sender<crate::peer::PeerEvent>,
+        tokio::sync::mpsc::Receiver<crate::peer::PeerEvent>,
+    ) {
+        tokio::sync::mpsc::channel(crate::constants::MAX_PEER_EVENTS)
     }
 
     #[tokio::test]
@@ -363,7 +376,7 @@ mod tests {
         let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .expect("connect");
-        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = event_channel();
         let (_cmd, handle) = spawn_peer(
             stream,
             format!("127.0.0.1:{port}").parse().expect("addr"),
@@ -376,22 +389,20 @@ mod tests {
             },
             0,
             event_tx,
+            None,
         );
 
-        for _ in 0..40 {
-            manager.process_events().await.expect("events");
-            if manager.peer_count() > 0 {
-                break;
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
+        manager
+            .drive_until(|manager| manager.peer_count() > 0, Duration::from_secs(5))
+            .await
+            .expect("drive");
 
         assert_eq!(manager.peer_count(), 1);
         handle.abort();
     }
 
     #[tokio::test]
-    async fn peer_manager_relays_inv_to_connected_peer() {
+    async fn peer_manager_relays_inv_bytes_to_connected_peer() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -400,7 +411,7 @@ mod tests {
 
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
-            chain.clone(),
+            chain,
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
@@ -413,45 +424,74 @@ mod tests {
         manager.spawn_acceptor();
 
         sleep(Duration::from_millis(20)).await;
-        let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .expect("connect");
-        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_cmd, handle) = spawn_peer(
-            stream,
-            format!("127.0.0.1:{port}").parse().expect("addr"),
-            ConnectionDirection::Outbound,
-            Network::Testnet,
-            chain,
-            HandshakeConfig {
-                local_nonce: 77,
-                timeout: Duration::from_secs(5),
-            },
-            0,
-            event_tx,
-        );
+        client_handshake(&mut stream, 77).await;
 
-        for _ in 0..40 {
-            manager.process_events().await.expect("events");
-            if manager.peer_count() > 0 {
-                break;
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
+        manager
+            .drive_until(|manager| manager.peer_count() > 0, Duration::from_secs(5))
+            .await
+            .expect("drive");
 
         let hash = [0x42u8; 32];
+        let expected_items = vec![InventoryVector {
+            inv_type: InvType::Block,
+            hash,
+        }];
         manager
-            .relay_inventory(
-                None,
-                vec![InventoryVector {
-                    inv_type: InvType::Block,
-                    hash,
-                }],
-            )
+            .relay_inventory(None, expected_items.clone())
             .await
             .expect("relay");
 
-        handle.abort();
+        let message = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_message(&mut stream, Network::Testnet),
+        )
+        .await
+        .expect("read timeout")
+        .expect("read inv");
+        assert_eq!(message.command, "inv");
+        match message.payload {
+            crate::message::MessagePayload::Inv(items) => {
+                assert_eq!(items, expected_items);
+                let payload = encode_inv(&items).expect("encode inv");
+                assert_eq!(decode_inv(&payload).expect("decode inv"), items);
+            }
+            other => panic!("expected inv payload, got {other:?}"),
+        }
+    }
+
+    async fn client_handshake(stream: &mut TcpStream, nonce: u64) {
+        use crate::codec::default_version_message;
+        use crate::framing::{read_message, write_message};
+        use crate::message::{Message, MessagePayload};
+
+        write_message(
+            stream,
+            Network::Testnet,
+            &Message::version(default_version_message(nonce, 1, 0)),
+        )
+        .await
+        .expect("write version");
+        match read_message(stream, Network::Testnet)
+            .await
+            .expect("peer version")
+            .payload
+        {
+            MessagePayload::Version(_) => {}
+            other => panic!("expected version, got {other:?}"),
+        }
+        assert_eq!(
+            read_message(stream, Network::Testnet)
+                .await
+                .expect("verack")
+                .command,
+            "verack"
+        );
+        write_message(stream, Network::Testnet, &Message::verack())
+            .await
+            .expect("write verack");
     }
 
     #[tokio::test]
@@ -473,5 +513,55 @@ mod tests {
                 .await,
             Err(crate::error::NetError::ConnectionLimitReached)
         );
+    }
+
+    #[tokio::test]
+    async fn inbound_flood_respects_capacity_before_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        drop(listener);
+
+        const MAX_INBOUND: usize = 2;
+        let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
+        let mut manager = PeerManager::new(
+            chain,
+            PeerManagerConfig {
+                network: Network::Testnet,
+                listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+                max_inbound: MAX_INBOUND,
+                max_outbound: 0,
+                seeds: SeedStrategy::Fixed(vec![]),
+            },
+        );
+        manager.start_listener().await.expect("listen");
+        manager.spawn_acceptor();
+
+        sleep(Duration::from_millis(20)).await;
+
+        let mut clients = Vec::new();
+        for _ in 0..8 {
+            if let Ok(stream) = TcpStream::connect(format!("127.0.0.1:{port}")).await {
+                clients.push(stream);
+            }
+        }
+
+        manager
+            .drive_until(
+                |manager| {
+                    manager.peer_count() == MAX_INBOUND && manager.inbound_reserved() <= MAX_INBOUND
+                },
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("drive");
+
+        assert_eq!(manager.peer_count(), MAX_INBOUND);
+        assert!(manager.inbound_reserved() <= MAX_INBOUND);
+
+        for mut stream in clients {
+            let _ = stream.shutdown().await;
+        }
     }
 }

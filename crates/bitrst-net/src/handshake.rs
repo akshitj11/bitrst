@@ -148,11 +148,15 @@ impl HandshakeState {
 }
 
 fn rand_nonce() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(1)
+    let mut bytes = [0u8; 8];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        return SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(1);
+    }
+    u64::from_le_bytes(bytes)
 }
 
 #[cfg(test)]

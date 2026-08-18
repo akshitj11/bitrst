@@ -103,6 +103,7 @@ dependencies = [
  "bitrst-core",
  "bitrst-crypto",
  "bytes",
+ "getrandom",
  "hex",
  "thiserror",
  "tokio",

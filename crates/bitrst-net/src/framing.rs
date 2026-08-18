@@ -86,14 +86,15 @@ impl MessageWriter {
         (Self { sender }, handle)
     }
 
-    /// Enqueues a message for sending.
+    /// Enqueues a message for sending, awaiting capacity when the queue is full.
     ///
     /// # Errors
     ///
-    /// Returns [`NetError::OutboundQueueFull`] when the queue is saturated.
+    /// Returns [`NetError::OutboundQueueFull`] when the writer task has stopped.
     pub async fn send(&self, message: Message) -> Result<(), NetError> {
         self.sender
-            .try_send(message)
+            .send(message)
+            .await
             .map_err(|_| NetError::OutboundQueueFull)
     }
 }
@@ -182,7 +183,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{read_message, write_message, FramedReader};
+    use super::{read_message, write_message, FramedReader, MessageWriter};
     use crate::constants::Network;
     use crate::message::Message;
     #[tokio::test]
@@ -212,5 +213,83 @@ mod tests {
             .await
             .expect("read");
         assert_eq!(decoded.command, "verack");
+    }
+
+    #[tokio::test]
+    async fn message_writer_send_waits_for_bounded_capacity() {
+        use std::pin::Pin;
+        use std::sync::{Arc, Mutex};
+        use std::task::{Context, Poll};
+        use tokio::io::AsyncWrite;
+        use tokio::sync::Notify;
+        use tokio::time::{sleep, Duration};
+
+        struct PausedWriter {
+            gate: Arc<Notify>,
+            released: Arc<Mutex<bool>>,
+        }
+
+        impl AsyncWrite for PausedWriter {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<std::io::Result<usize>> {
+                if *self.released.lock().expect("lock") {
+                    return Poll::Ready(Ok(buf.len()));
+                }
+                self.gate.notify_waiters();
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+
+            fn poll_flush(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let gate = Arc::new(Notify::new());
+        let released = Arc::new(Mutex::new(false));
+        let writer = PausedWriter {
+            gate: Arc::clone(&gate),
+            released: Arc::clone(&released),
+        };
+        let (message_writer, handle) = MessageWriter::spawn(writer, Network::Testnet, 1);
+
+        message_writer
+            .send(Message::verack())
+            .await
+            .expect("first send");
+        sleep(Duration::from_millis(20)).await;
+        message_writer
+            .send(Message::verack())
+            .await
+            .expect("second send fills queue");
+
+        let third_send = tokio::spawn(async move { message_writer.send(Message::verack()).await });
+
+        sleep(Duration::from_millis(50)).await;
+        assert!(!third_send.is_finished());
+
+        *released.lock().expect("lock") = true;
+        gate.notify_waiters();
+
+        tokio::time::timeout(Duration::from_secs(1), third_send)
+            .await
+            .expect("third send should complete after writer unblocks")
+            .expect("join")
+            .expect("third send");
+
+        let _ = handle.await;
     }
 }

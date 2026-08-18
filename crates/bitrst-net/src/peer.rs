@@ -12,8 +12,9 @@ use crate::constants::{Network, MAX_OUTBOUND_QUEUE};
 use crate::error::NetError;
 use crate::framing::{FramedReader, MessageWriter};
 use crate::handshake::{ConnectionDirection, HandshakeConfig, HandshakePhase, HandshakeState};
+use crate::inbound_capacity::InboundGuard;
 use crate::message::{Message, MessagePayload};
-use crate::relay::{handle_peer_message, RelayAction};
+use crate::relay::{handle_peer_message, BlockRequestTracker, RelayAction};
 
 /// Events emitted by a connected peer task.
 #[derive(Debug)]
@@ -50,6 +51,7 @@ pub enum PeerCommand {
 
 /// Spawns a peer task over an established TCP stream.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_peer(
     stream: TcpStream,
     addr: SocketAddr,
@@ -58,7 +60,8 @@ pub fn spawn_peer(
     chain: ChainHandle,
     handshake_config: HandshakeConfig,
     start_height: i32,
-    event_tx: mpsc::UnboundedSender<PeerEvent>,
+    event_tx: mpsc::Sender<PeerEvent>,
+    inbound_guard: Option<InboundGuard>,
 ) -> (mpsc::Sender<PeerCommand>, tokio::task::JoinHandle<()>) {
     let (command_tx, command_rx) = mpsc::channel(32);
     let handle = tokio::spawn(async move {
@@ -72,15 +75,17 @@ pub fn spawn_peer(
             start_height,
             command_rx,
             &event_tx,
+            inbound_guard,
         )
         .await;
         if let Err(error) = result {
-            let _ = event_tx.send(PeerEvent::Disconnected { addr, error });
+            let _ = emit_event(&event_tx, PeerEvent::Disconnected { addr, error }).await;
         }
     });
     (command_tx, handle)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_peer(
     stream: TcpStream,
     addr: SocketAddr,
@@ -90,11 +95,13 @@ async fn run_peer(
     handshake_config: HandshakeConfig,
     start_height: i32,
     mut commands: mpsc::Receiver<PeerCommand>,
-    event_tx: &mpsc::UnboundedSender<PeerEvent>,
+    event_tx: &mpsc::Sender<PeerEvent>,
+    _inbound_guard: Option<InboundGuard>,
 ) -> Result<(), NetError> {
     let (mut read_half, write_half) = stream.into_split();
     let (writer, writer_handle) = MessageWriter::spawn(write_half, network, MAX_OUTBOUND_QUEUE);
     let mut framed = FramedReader::new();
+    let mut block_requests = BlockRequestTracker::default();
 
     let mut handshake = HandshakeState::new(direction, handshake_config.clone());
     let local_version =
@@ -128,7 +135,7 @@ async fn run_peer(
         }
     }
 
-    let _ = event_tx.send(PeerEvent::HandshakeComplete { addr });
+    emit_event(event_tx, PeerEvent::HandshakeComplete { addr }).await?;
 
     loop {
         tokio::select! {
@@ -147,12 +154,7 @@ async fn run_peer(
                         ));
                     }
                     _ => {
-                        let action = tokio::task::spawn_blocking({
-                            let chain = chain.clone();
-                            move || handle_peer_message(&chain, message)
-                        })
-                        .await
-                        .map_err(|_| NetError::TaskJoinFailed)??;
+                        let action = handle_peer_message(&chain, message, &mut block_requests)?;
 
                         match action {
                             RelayAction::None => {}
@@ -162,7 +164,11 @@ async fn run_peer(
                                 }
                             }
                             RelayAction::Announce(items) => {
-                                let _ = event_tx.send(PeerEvent::Announce { addr, items });
+                                let _ = emit_event(
+                                    event_tx,
+                                    PeerEvent::Announce { addr, items },
+                                )
+                                .await;
                             }
                         }
                     }
@@ -174,6 +180,15 @@ async fn run_peer(
     drop(writer);
     let _ = writer_handle.await;
     Ok(())
+}
+
+async fn emit_event(tx: &mpsc::Sender<PeerEvent>, event: PeerEvent) -> Result<(), NetError> {
+    match event {
+        PeerEvent::Disconnected { .. } | PeerEvent::HandshakeComplete { .. } => {
+            tx.send(event).await.map_err(|_| NetError::EventQueueFull)
+        }
+        PeerEvent::Announce { .. } => tx.try_send(event).map_err(|_| NetError::EventQueueFull),
+    }
 }
 
 fn unix_timestamp() -> i64 {
@@ -189,29 +204,14 @@ mod tests {
     use super::{spawn_peer, PeerEvent};
     use crate::constants::Network;
     use crate::handshake::{ConnectionDirection, HandshakeConfig};
-    use bitrst_core::{Block, BlockHeader, ChainHandle, Target};
+    use crate::testutil::{genesis_block, NETWORK_TIME};
+    use bitrst_core::ChainHandle;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::time::{sleep, Duration};
 
-    const NETWORK_TIME: u32 = 1_231_006_505;
-    const TEST_BITS: u32 = 0x1f00_ffff;
-
-    fn genesis_block() -> Block {
-        let header = BlockHeader {
-            version: 1,
-            prev_blockhash: [0u8; 32],
-            merkle_root: [0u8; 32],
-            time: NETWORK_TIME,
-            bits: TEST_BITS,
-            nonce: 0,
-        };
-        let mut block = Block::coinbase(header, 0, 50_0000_0000);
-        let target = Target::from_bits(TEST_BITS).expect("bits");
-        while !target.meets(&block.header.hash()) {
-            block.header.nonce = block.header.nonce.wrapping_add(1);
-        }
-        block
+    fn event_channel() -> (mpsc::Sender<PeerEvent>, mpsc::Receiver<PeerEvent>) {
+        mpsc::channel(crate::constants::MAX_PEER_EVENTS)
     }
 
     #[tokio::test]
@@ -221,7 +221,7 @@ mod tests {
         let chain_in = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let chain_out = chain_in.clone();
 
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = event_channel();
 
         let server = tokio::spawn(async move {
             let (stream, peer_addr) = listener.accept().await.expect("accept");
@@ -237,12 +237,13 @@ mod tests {
                 },
                 0,
                 event_tx,
+                None,
             )
         });
 
         sleep(Duration::from_millis(50)).await;
         let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-        let (event_tx2, mut event_rx2) = mpsc::unbounded_channel();
+        let (event_tx2, mut event_rx2) = event_channel();
         let (_cmd_tx, handle) = spawn_peer(
             stream,
             addr,
@@ -255,6 +256,7 @@ mod tests {
             },
             0,
             event_tx2,
+            None,
         );
 
         let inbound_event = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
@@ -282,7 +284,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = event_channel();
 
         let server = tokio::spawn(async move {
             let (stream, peer_addr) = listener.accept().await.expect("accept");
@@ -298,6 +300,7 @@ mod tests {
                 },
                 0,
                 event_tx,
+                None,
             )
         });
 
@@ -311,6 +314,89 @@ mod tests {
         assert!(matches!(event, PeerEvent::Disconnected { .. }));
 
         let (_cmd, server_handle) = server.await.expect("server");
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn duplicate_block_does_not_disconnect_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let genesis = genesis_block();
+        let chain_in = ChainHandle::new_genesis(genesis.clone(), NETWORK_TIME).expect("genesis");
+        let chain_out = ChainHandle::new_genesis(genesis, NETWORK_TIME).expect("genesis");
+
+        let (event_tx, mut event_rx) = event_channel();
+        let server = tokio::spawn(async move {
+            let (stream, peer_addr) = listener.accept().await.expect("accept");
+            let (cmd_tx, handle) = spawn_peer(
+                stream,
+                peer_addr,
+                ConnectionDirection::Inbound,
+                Network::Testnet,
+                chain_in,
+                HandshakeConfig {
+                    local_nonce: 30,
+                    timeout: Duration::from_secs(5),
+                },
+                0,
+                event_tx,
+                None,
+            );
+            (cmd_tx, handle)
+        });
+
+        sleep(Duration::from_millis(50)).await;
+        let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (event_tx2, mut event_rx2) = event_channel();
+        let (cmd_tx, handle) = spawn_peer(
+            stream,
+            addr,
+            ConnectionDirection::Outbound,
+            Network::Testnet,
+            chain_out,
+            HandshakeConfig {
+                local_nonce: 40,
+                timeout: Duration::from_secs(5),
+            },
+            0,
+            event_tx2,
+            None,
+        );
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("timeout");
+        let _ = tokio::time::timeout(Duration::from_secs(5), event_rx2.recv())
+            .await
+            .expect("timeout");
+
+        let (server_cmd, server_handle) = server.await.expect("server");
+        let duplicate = genesis_block();
+        cmd_tx
+            .send(super::PeerCommand::Send(crate::message::Message::block(
+                duplicate.clone(),
+            )))
+            .await
+            .expect("send duplicate");
+        cmd_tx
+            .send(super::PeerCommand::Send(crate::message::Message::block(
+                duplicate,
+            )))
+            .await
+            .expect("send duplicate again");
+
+        sleep(Duration::from_millis(200)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), event_rx2.recv())
+                .await
+                .is_err(),
+            "duplicate blocks should not disconnect the peer"
+        );
+        assert!(server_cmd.send(super::PeerCommand::Shutdown).await.is_ok());
+
+        drop(cmd_tx);
+        handle.abort();
+        drop(server_cmd);
         server_handle.abort();
     }
 }
