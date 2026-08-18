@@ -3,8 +3,8 @@
 use bitrst_crypto::sha256d::sha256d;
 use serde::{Deserialize, Serialize};
 
-use crate::merkle::merkle_root;
 use crate::limits::{MAX_BLOCK_SERIALIZED_SIZE, MAX_TRANSACTIONS_PER_BLOCK};
+use crate::merkle::merkle_root;
 use crate::transaction::{write_compact_size, Transaction};
 use crate::wire::{DecodeError, WireReader};
 

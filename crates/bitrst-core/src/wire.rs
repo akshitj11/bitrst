@@ -117,10 +117,7 @@ impl<'a> WireReader<'a> {
         Ok(())
     }
 
-    pub(crate) fn read_compact_size(
-        &mut self,
-        context: &'static str,
-    ) -> Result<u64, DecodeError> {
+    pub(crate) fn read_compact_size(&mut self, context: &'static str) -> Result<u64, DecodeError> {
         let (value, minimum) = match self.read_array::<1>(context)?[0] {
             value @ 0..=0xfc => return Ok(u64::from(value)),
             0xfd => (
