@@ -51,30 +51,35 @@ pub enum DecodeError {
     },
 }
 
-pub(crate) struct WireReader<'a> {
+pub struct WireReader<'a> {
     bytes: &'a [u8],
     position: usize,
 }
 
 impl<'a> WireReader<'a> {
-    pub(crate) fn new(bytes: &'a [u8]) -> Self {
+    /// Creates a reader over `bytes`.
+    pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, position: 0 }
     }
 
-    pub(crate) fn read_u32(&mut self, context: &'static str) -> Result<u32, DecodeError> {
+    /// Reads one little-endian `u32`.
+    pub fn read_u32(&mut self, context: &'static str) -> Result<u32, DecodeError> {
         let bytes = self.read_array::<4>(context)?;
         Ok(u32::from_le_bytes(bytes))
     }
 
-    pub(crate) fn read_i32(&mut self, context: &'static str) -> Result<i32, DecodeError> {
+    /// Reads one little-endian `i32`.
+    pub fn read_i32(&mut self, context: &'static str) -> Result<i32, DecodeError> {
         Ok(i32::from_le_bytes(self.read_array(context)?))
     }
 
-    pub(crate) fn read_u64(&mut self, context: &'static str) -> Result<u64, DecodeError> {
+    /// Reads one little-endian `u64`.
+    pub fn read_u64(&mut self, context: &'static str) -> Result<u64, DecodeError> {
         Ok(u64::from_le_bytes(self.read_array(context)?))
     }
 
-    pub(crate) fn read_bytes(
+    /// Reads exactly `length` bytes.
+    pub fn read_bytes(
         &mut self,
         length: usize,
         context: &'static str,
@@ -92,7 +97,8 @@ impl<'a> WireReader<'a> {
         Ok(&self.bytes[start..self.position])
     }
 
-    pub(crate) fn read_limited_len(
+    /// Reads a compact-size length capped by `limit`.
+    pub fn read_limited_len(
         &mut self,
         context: &'static str,
         limit: usize,
@@ -113,11 +119,13 @@ impl<'a> WireReader<'a> {
         Ok(length)
     }
 
-    pub(crate) fn remaining(&self) -> usize {
+    /// Returns the number of unread bytes.
+    pub fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.position)
     }
 
-    pub(crate) fn finish(self, context: &'static str) -> Result<(), DecodeError> {
+    /// Ensures the reader consumed the entire input.
+    pub fn finish(self, context: &'static str) -> Result<(), DecodeError> {
         let remaining = self.remaining();
         if remaining != 0 {
             return Err(DecodeError::TrailingBytes { context, remaining });
@@ -125,7 +133,8 @@ impl<'a> WireReader<'a> {
         Ok(())
     }
 
-    pub(crate) fn read_compact_size(&mut self, context: &'static str) -> Result<u64, DecodeError> {
+    /// Reads one canonical CompactSize integer.
+    pub fn read_compact_size(&mut self, context: &'static str) -> Result<u64, DecodeError> {
         let (value, minimum) = match self.read_array::<1>(context)?[0] {
             value @ 0..=0xfc => return Ok(u64::from(value)),
             0xfd => (
