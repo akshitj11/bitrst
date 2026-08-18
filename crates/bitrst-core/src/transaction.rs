@@ -203,6 +203,7 @@ pub(crate) fn write_compact_size(value: u64, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{Transaction, TxInput, TxOutput};
+    use crate::wire::DecodeError;
 
     #[test]
     fn serializes_and_hashes_coinbase_like_tx() {
@@ -256,5 +257,62 @@ mod tests {
     fn legacy_transaction_roundtrips_wire_encoding() {
         let tx = Transaction::coinbase(1, 50_0000_0000);
         assert_eq!(Transaction::deserialize(&tx.serialize()), Ok(tx));
+    }
+
+    #[test]
+    fn rejects_transaction_truncation_at_every_byte() {
+        let encoded = Transaction::coinbase(1, 50_0000_0000).serialize();
+        for length in 0..encoded.len() {
+            assert!(
+                Transaction::deserialize(&encoded[..length]).is_err(),
+                "accepted prefix of length {length}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_transaction_trailing_bytes() {
+        let mut encoded = Transaction::coinbase(1, 50_0000_0000).serialize();
+        encoded.push(0);
+        assert!(matches!(
+            Transaction::deserialize(&encoded),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_script_before_allocation() {
+        let mut encoded = vec![1, 0, 0, 0, 1];
+        encoded.extend_from_slice(&[0; 32]);
+        encoded.extend_from_slice(&u32::MAX.to_le_bytes());
+        encoded.extend_from_slice(&[0xfd, 0x11, 0x27]);
+        assert!(matches!(
+            Transaction::deserialize(&encoded),
+            Err(DecodeError::LimitExceeded {
+                context: "scriptSig",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_input_count_before_allocation() {
+        let encoded = [1, 0, 0, 0, 0xfd, 0xa9, 0x61];
+        assert!(matches!(
+            Transaction::deserialize(&encoded),
+            Err(DecodeError::LimitExceeded {
+                context: "transaction input count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_non_canonical_transaction_counts() {
+        let encoded = [1, 0, 0, 0, 0xfd, 0, 0];
+        assert!(matches!(
+            Transaction::deserialize(&encoded),
+            Err(DecodeError::NonCanonicalCompactSize { .. })
+        ));
     }
 }

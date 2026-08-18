@@ -188,6 +188,8 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::{Block, BlockHeader};
+    use crate::limits::MAX_BLOCK_SERIALIZED_SIZE;
+    use crate::wire::DecodeError;
     use crate::Transaction;
 
     fn to_bitcoin_hex(bytes: [u8; 32]) -> String {
@@ -284,6 +286,52 @@ mod tests {
     fn block_roundtrips_wire_encoding() {
         let block = Block::coinbase(sample_header(), 1, 50_0000_0000);
         assert_eq!(Block::deserialize(&block.serialize()), Ok(block));
+    }
+
+    #[test]
+    fn rejects_block_truncation_at_every_byte() {
+        let encoded = Block::coinbase(sample_header(), 1, 50_0000_0000).serialize();
+        for length in 0..encoded.len() {
+            assert!(
+                Block::deserialize(&encoded[..length]).is_err(),
+                "accepted prefix of length {length}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_block_trailing_bytes() {
+        let mut encoded = Block::coinbase(sample_header(), 1, 50_0000_0000).serialize();
+        encoded.push(0);
+        assert!(matches!(
+            Block::deserialize(&encoded),
+            Err(DecodeError::TrailingBytes { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_block_before_parsing() {
+        let encoded = vec![0; MAX_BLOCK_SERIALIZED_SIZE + 1];
+        assert!(matches!(
+            Block::deserialize(&encoded),
+            Err(DecodeError::LimitExceeded {
+                context: "block size",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_transaction_count_before_allocation() {
+        let mut encoded = sample_header().serialize().to_vec();
+        encoded.extend_from_slice(&[0xfd, 0xa9, 0x61]);
+        assert!(matches!(
+            Block::deserialize(&encoded),
+            Err(DecodeError::LimitExceeded {
+                context: "block transaction count",
+                ..
+            })
+        ));
     }
 
     #[test]
