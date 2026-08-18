@@ -22,3 +22,6 @@ pub mod handshake;
 pub use handshake::{ConnectionDirection, HandshakeConfig, HandshakePhase, HandshakeState};
 /// Async framed reader and writer helpers.
 pub mod framing;
+/// Block relay and chain integration.
+pub mod relay;
+pub use relay::{handle_peer_message, RelayAction};
