@@ -58,6 +58,16 @@ impl ChainHandle {
         Ok(self.write()?.take_events())
     }
 
+    /// Returns true when the node already knows `hash`.
+    pub fn has_block(&self, hash: &[u8; 32]) -> Result<bool, ChainError> {
+        Ok(self.read()?.has_block_hash(hash))
+    }
+
+    /// Returns a known block by hash, if present.
+    pub fn get_block(&self, hash: &[u8; 32]) -> Result<Option<Block>, ChainError> {
+        Ok(self.read()?.block_by_hash(hash))
+    }
+
     fn read(&self) -> Result<RwLockReadGuard<'_, Chain>, ChainError> {
         self.inner.read().map_err(|_| ChainError::LockPoisoned)
     }
@@ -83,6 +93,19 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert!(handle.take_events().expect("events").is_empty());
+    }
+
+    #[test]
+    fn get_block_returns_genesis_by_hash() {
+        let genesis = genesis_block();
+        let hash = genesis.hash();
+        let handle = ChainHandle::new_genesis(genesis, NETWORK_TIME).expect("genesis");
+
+        assert!(handle.has_block(&hash).expect("has"));
+        assert_eq!(
+            handle.get_block(&hash).expect("get").expect("some").hash(),
+            hash
+        );
     }
 
     fn genesis_block() -> Block {

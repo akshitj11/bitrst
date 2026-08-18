@@ -318,6 +318,19 @@ impl Chain {
         &self.store
     }
 
+    /// Returns true when a block hash is known (active chain, side chain, or orphan pool).
+    pub fn has_block_hash(&self, hash: &[u8; 32]) -> bool {
+        self.known.contains_key(hash) || self.orphans.contains_key(hash)
+    }
+
+    /// Returns a cloned block for `hash` when it is known locally.
+    pub fn block_by_hash(&self, hash: &[u8; 32]) -> Option<Block> {
+        self.known
+            .get(hash)
+            .map(|meta| meta.block.clone())
+            .or_else(|| self.orphans.get(hash).map(|entry| entry.block.clone()))
+    }
+
     /// Attempts to connect a block to the chain.
     pub fn connect_block(&mut self, block: Block) -> Result<ConnectResult, ChainError> {
         self.connect_block_inner(block, true)
