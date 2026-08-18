@@ -44,6 +44,7 @@ pub fn encode_getdata(items: &[InventoryVector]) -> Result<Vec<u8>, NetError> {
 #[cfg(test)]
 mod tests {
     use super::{decode_getdata, decode_inv, encode_getdata, encode_inv};
+    use crate::error::NetError;
     use crate::message::{InvType, InventoryVector};
 
     fn sample_hash(byte: u8) -> [u8; 32] {
@@ -81,6 +82,9 @@ mod tests {
         encoded[2] = 0;
         encoded[3] = 0;
         encoded[4] = 0;
-        assert!(decode_inv(&encoded).is_err());
+        assert_eq!(
+            decode_inv(&encoded),
+            Err(NetError::UnknownInventoryType { inv_type: 99 })
+        );
     }
 }

@@ -19,8 +19,8 @@ pub(crate) fn decode_inventory_list(
         let inv_type = reader
             .read_u32("inv entry type")
             .map_err(NetError::Decode)?;
-        let inv_type = InvType::from_u32(inv_type)
-            .ok_or(NetError::HandshakeViolation("unknown inventory type"))?;
+        let inv_type =
+            InvType::from_u32(inv_type).ok_or(NetError::UnknownInventoryType { inv_type })?;
         let mut hash = [0u8; 32];
         hash.copy_from_slice(
             reader

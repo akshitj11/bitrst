@@ -64,6 +64,28 @@ pub enum NetError {
     #[error("outbound queue full")]
     OutboundQueueFull,
 
+    /// The manager event queue is full and a non-critical event was dropped.
+    #[error("peer event queue full")]
+    EventQueueFull,
+
+    /// The manager registration queue is full.
+    #[error("peer registration queue full")]
+    RegistrationQueueFull,
+
+    /// A post-handshake command name is not supported.
+    #[error("unsupported command {command}")]
+    UnsupportedCommand {
+        /// Wire command string from the message header.
+        command: String,
+    },
+
+    /// An inventory vector used an unknown type value.
+    #[error("unknown inventory type {inv_type}")]
+    UnknownInventoryType {
+        /// Raw inventory type from the wire.
+        inv_type: u32,
+    },
+
     /// Chain validation failed while connecting a block.
     #[error("chain error: {0}")]
     Chain(#[from] ChainError),

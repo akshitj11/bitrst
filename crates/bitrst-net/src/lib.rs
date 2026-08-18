@@ -25,6 +25,11 @@ pub mod relay;
 /// Offline-friendly seed selection.
 pub mod seeds;
 
+#[cfg(test)]
+mod testutil;
+
+mod inbound_capacity;
+
 pub use constants::Network;
 pub use envelope::{checksum, Command, MessageHeader};
 pub use error::NetError;
@@ -32,5 +37,5 @@ pub use handshake::{ConnectionDirection, HandshakeConfig, HandshakePhase, Handsh
 pub use message::{InvType, InventoryVector, Message, MessagePayload, VersionMessage};
 pub use peer::{spawn_peer, PeerCommand, PeerEvent};
 pub use peers::{PeerManager, PeerManagerConfig};
-pub use relay::{handle_peer_message, RelayAction};
+pub use relay::{handle_peer_message, BlockRequestTracker, RelayAction};
 pub use seeds::SeedStrategy;

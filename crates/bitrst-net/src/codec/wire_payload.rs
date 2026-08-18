@@ -37,7 +37,11 @@ pub fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, NetError
         "getdata" => MessagePayload::GetData(decode_getdata(payload)?),
         "block" => MessagePayload::Block(Block::deserialize(payload)?),
         "tx" => MessagePayload::Tx(Transaction::deserialize(payload)?),
-        _ => return Err(NetError::HandshakeViolation("unsupported command")),
+        _ => {
+            return Err(NetError::UnsupportedCommand {
+                command: command.to_owned(),
+            });
+        }
     };
 
     Ok(Message {
@@ -49,6 +53,7 @@ pub fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, NetError
 #[cfg(test)]
 mod tests {
     use super::decode_payload;
+    use crate::error::NetError;
     use crate::message::Message;
     use bitrst_core::{Block, BlockHeader, Transaction};
 
@@ -79,6 +84,17 @@ mod tests {
         assert_eq!(
             decoded.payload,
             crate::message::MessagePayload::Block(block)
+        );
+    }
+
+    #[test]
+    fn unsupported_command_uses_protocol_error_variant() {
+        let result = decode_payload("notacommand", &[]);
+        assert_eq!(
+            result,
+            Err(NetError::UnsupportedCommand {
+                command: "notacommand".to_owned(),
+            })
         );
     }
 }
