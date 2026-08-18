@@ -3,6 +3,7 @@
 pub mod args;
 pub mod chain;
 pub mod error;
+pub mod mine;
 pub mod tip;
 
 use std::ffi::OsString;
@@ -25,9 +26,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Print the active chain tip hash (hex, internal byte order).
     Tip(tip::TipArgs),
+    /// Mine one or more blocks on an ephemeral local chain.
+    Mine(mine::MineArgs),
 }
 
+/// Parses CLI arguments from `args` and runs the selected subcommand.
 pub fn run_from<I, T>(args: I) -> Result<(), CliError>
 where
     I: IntoIterator<Item = T>,
@@ -36,11 +41,16 @@ where
     run_parsed(Cli::try_parse_from(args)?)
 }
 
+/// Runs an already-parsed CLI command.
 pub fn run_parsed(cli: Cli) -> Result<(), CliError> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     match cli.command {
         Commands::Tip(args) => tip::run(args, &mut out),
+        Commands::Mine(args) => {
+            let _ = mine::run(args, &mut out)?;
+            Ok(())
+        }
     }
 }
 
@@ -51,15 +61,42 @@ mod tests {
 
     #[test]
     fn cli_parses_tip_subcommand() {
-        let cli = Cli::try_parse_from(["bitrst", "tip", "--network-time", "1700000000"]).expect("parse");
+        let cli =
+            Cli::try_parse_from(["bitrst", "tip", "--network-time", "1700000000"]).expect("parse");
         match cli.command {
             Commands::Tip(args) => assert_eq!(args.network_time, Some(1_700_000_000)),
+            Commands::Mine(_) => panic!("expected tip"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_mine_subcommand() {
+        let cli = Cli::try_parse_from([
+            "bitrst",
+            "mine",
+            "--count",
+            "3",
+            "--value",
+            "100000000",
+            "--bits",
+            "520159231",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::Mine(args) => {
+                assert_eq!(args.count, 3);
+                assert_eq!(args.bits, 0x1f00_ffff);
+            }
+            Commands::Tip(_) => panic!("expected mine"),
         }
     }
 
     #[test]
     fn run_from_tip_rejects_zero_network_time() {
         let err = run_from(["bitrst", "tip", "--network-time", "0"]).expect_err("zero");
-        assert!(matches!(err, crate::cli::error::CliError::InvalidNetworkTime));
+        assert!(matches!(
+            err,
+            crate::cli::error::CliError::InvalidNetworkTime
+        ));
     }
 }
