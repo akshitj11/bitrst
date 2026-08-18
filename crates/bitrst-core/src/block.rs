@@ -239,8 +239,50 @@ mod tests {
         ))
         .expect("valid hex");
         let header = BlockHeader::deserialize(&bytes).expect("valid genesis header");
-        assert_eq!(header.nonce, 2_083_236_893);
+        assert_eq!(
+            header,
+            BlockHeader {
+                version: 1,
+                prev_blockhash: [0; 32],
+                merkle_root: [
+                    0x3b, 0xa3, 0xed, 0xfd, 0x7a, 0x7b, 0x12, 0xb2, 0x7a, 0xc7, 0x2c, 0x3e,
+                    0x67, 0x76, 0x8f, 0x61, 0x7f, 0xc8, 0x1b, 0xc3, 0x88, 0x8a, 0x51, 0x32,
+                    0x3a, 0x9f, 0xb8, 0xaa, 0x4b, 0x1e, 0x5e, 0x4a,
+                ],
+                time: 1_231_006_505,
+                bits: 0x1d00_ffff,
+                nonce: 2_083_236_893,
+            }
+        );
         assert_eq!(header.serialize().as_slice(), bytes);
+        assert_eq!(
+            to_bitcoin_hex(header.hash()),
+            "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_block_header() {
+        let encoded = sample_header().serialize();
+        for length in 0..encoded.len() {
+            assert!(matches!(
+                BlockHeader::deserialize(&encoded[..length]),
+                Err(DecodeError::Truncated { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_block_header_trailing_bytes() {
+        let mut encoded = sample_header().serialize().to_vec();
+        encoded.push(0);
+        assert!(matches!(
+            BlockHeader::deserialize(&encoded),
+            Err(DecodeError::TrailingBytes {
+                context: "block header",
+                remaining: 1
+            })
+        ));
     }
 
     #[test]
@@ -330,6 +372,19 @@ mod tests {
             Err(DecodeError::LimitExceeded {
                 context: "block transaction count",
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_non_canonical_block_transaction_count() {
+        let mut encoded = sample_header().serialize().to_vec();
+        encoded.extend_from_slice(&[0xfd, 0, 0]);
+        assert!(matches!(
+            Block::deserialize(&encoded),
+            Err(DecodeError::NonCanonicalCompactSize {
+                context: "block transaction count",
+                value: 0
             })
         ));
     }

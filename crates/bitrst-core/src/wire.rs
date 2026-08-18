@@ -193,4 +193,22 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn compact_size_rejects_truncated_prefixed_payloads() {
+        for bytes in [
+            &[0xfd][..],
+            &[0xfd, 0xfd],
+            &[0xfe, 0, 0, 1],
+            &[0xff, 0, 0, 0, 0, 1, 0, 0],
+        ] {
+            assert!(matches!(
+                WireReader::new(bytes).read_compact_size("count"),
+                Err(super::DecodeError::Truncated {
+                    context: "count",
+                    ..
+                })
+            ));
+        }
+    }
 }
