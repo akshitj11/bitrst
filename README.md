@@ -40,11 +40,12 @@ flowchart TB
     Mine[nonce search]
   end
 
-  subgraph future [planned M7]
-    Net[bitrst-net P2P]
+  subgraph net [bitrst-net P2P]
+    Net[PeerManager + relay]
   end
 
   Main --> Handle
+  Main --> Net
   Wallet --> Sign
   Wallet --> Handle
   Sign --> Hash
@@ -59,12 +60,36 @@ flowchart TB
   Chain --> Store
   VM --> Hash
   Mine --> Chain
-  Net -.-> Handle
+  Net --> Handle
 ```
 
 ![bitrst architecture](docs/architecture-diagram.mersketch.svg)
 
 Diagram source: [`docs/architecture-diagram.mmd`](docs/architecture-diagram.mmd) · Made with [Mersketch](https://github.com/akshitj11/Mersketch)
+
+## CLI
+
+The `bitrst` binary exposes ephemeral (in-memory) commands:
+
+| Command | Purpose |
+|---------|---------|
+| `tip` | Print the active chain tip hash |
+| `mine` | Mine one or more blocks on a local chain |
+| `wallet new` | Generate a P2PKH address (secrets hidden by default) |
+| `wallet address` | Derive an address from a private key (`--private-key-stdin`, `BITRST_PRIVATE_KEY`, or `--private-key`) |
+| `wallet balance` | Report balance for an address on a genesis-only chain |
+| `node` | Run a P2P node via `PeerManager` (Ctrl-C / SIGTERM shutdown) |
+
+Chain and wallet state is not persisted to disk yet; commands print an explicit notice.
+
+```bash
+bitrst tip
+bitrst mine --count 2 --network-time 1231006505
+bitrst wallet new
+bitrst wallet address --private-key-stdin   # hex on stdin
+bitrst wallet balance --address <addr> --network-time 1231006505
+bitrst node --listen 127.0.0.1:8333 --network testnet
+```
 
 ## Current scope
 
@@ -83,6 +108,7 @@ Diagram source: [`docs/architecture-diagram.mmd`](docs/architecture-diagram.mmd)
 - Universal-guide chain consensus integration tests (reorg safety, orphans, difficulty, validation, events)
 - M5 Script VM: P2PKH script verification, legacy sighash, `bitrst-script` stack interpreter
 - M6 Wallet: secp256k1 key generation, Base58Check P2PKH addresses, P2PKH signing, and active-chain UTXO tracking
+- M7 P2P networking: `bitrst-net` peer manager, handshake, block relay, and CLI `node` command
 - Wallet integration tests for signed local spends and reorg-safe event handling
 - CI for tests, clippy, and dependency security (`cargo audit`, `cargo deny`)
 
@@ -115,4 +141,4 @@ cargo deny check
 6. Chain robustness (M4.6): done
 7. Script VM (M5): done
 8. Wallet (M6): done
-9. P2P networking: next
+9. P2P networking (M7): done
