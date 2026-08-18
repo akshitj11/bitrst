@@ -53,6 +53,46 @@ fn child_block(parent: &Block) -> Block {
 }
 
 #[tokio::test]
+async fn checksum_mismatch_is_rejected() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let payload = b"payload-bytes";
+    let mut header = MessageHeader::encode(
+        "verack",
+        payload,
+        Network::Testnet.magic(),
+        bitrst_net::constants::MAX_PAYLOAD_SIZE,
+    )
+    .expect("header");
+    header[20] ^= 0xff;
+    client.write_all(&header).await.expect("header");
+    client.write_all(payload).await.expect("payload");
+
+    let result = read_message(&mut server, Network::Testnet).await;
+    assert!(matches!(
+        result,
+        Err(bitrst_net::NetError::ChecksumMismatch { .. })
+    ));
+}
+
+#[tokio::test]
+async fn truncated_inv_payload_is_rejected() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let bad_payload = vec![0x01, 0x00, 0x00, 0x00, 0x02];
+    let header = MessageHeader::encode(
+        "inv",
+        &bad_payload,
+        Network::Testnet.magic(),
+        bitrst_net::constants::MAX_PAYLOAD_SIZE,
+    )
+    .expect("header");
+    client.write_all(&header).await.expect("header");
+    client.write_all(&bad_payload).await.expect("payload");
+
+    let result = read_message(&mut server, Network::Testnet).await;
+    assert!(result.is_err());
+}
+
+#[tokio::test]
 async fn malformed_block_payload_is_rejected_without_panic() {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let bad_payload = vec![0xff; 16];
