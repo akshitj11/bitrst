@@ -3,6 +3,9 @@
 use bitrst_crypto::sha256d::sha256d;
 use serde::{Deserialize, Serialize};
 
+use crate::limits::{MAX_SCRIPT_SIZE, MAX_TRANSACTIONS_PER_BLOCK};
+use crate::wire::{DecodeError, WireReader};
+
 /// A reference to a previous transaction output plus an unlocking script.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxInput {
@@ -82,6 +85,57 @@ impl Transaction {
 
         out.extend_from_slice(&self.lock_time.to_le_bytes());
         out
+    }
+
+    /// Decodes one complete legacy (non-SegWit) Bitcoin transaction.
+    ///
+    /// Counts and scripts are bounded before allocation, non-canonical
+    /// CompactSize values are rejected, and trailing bytes are not accepted.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = WireReader::new(bytes);
+        let transaction = Self::decode_from(&mut reader)?;
+        reader.finish("transaction")?;
+        Ok(transaction)
+    }
+
+    pub(crate) fn decode_from(reader: &mut WireReader<'_>) -> Result<Self, DecodeError> {
+        let version = reader.read_i32("transaction version")?;
+        let input_count =
+            reader.read_limited_len("transaction input count", MAX_TRANSACTIONS_PER_BLOCK)?;
+        let mut inputs = Vec::with_capacity(input_count);
+        for _ in 0..input_count {
+            let mut previous_output = [0; 32];
+            previous_output.copy_from_slice(reader.read_bytes(32, "previous output hash")?);
+            let index = reader.read_u32("previous output index")?;
+            let script_len = reader.read_limited_len("scriptSig", MAX_SCRIPT_SIZE)?;
+            let script_sig = reader.read_bytes(script_len, "scriptSig")?.to_vec();
+            let sequence = reader.read_u32("input sequence")?;
+            inputs.push(TxInput {
+                previous_output,
+                index,
+                script_sig,
+                sequence,
+            });
+        }
+        let output_count =
+            reader.read_limited_len("transaction output count", MAX_TRANSACTIONS_PER_BLOCK)?;
+        let mut outputs = Vec::with_capacity(output_count);
+        for _ in 0..output_count {
+            let value = reader.read_u64("output value")?;
+            let script_len = reader.read_limited_len("scriptPubKey", MAX_SCRIPT_SIZE)?;
+            let script_pubkey = reader.read_bytes(script_len, "scriptPubKey")?.to_vec();
+            outputs.push(TxOutput {
+                value,
+                script_pubkey,
+            });
+        }
+        let lock_time = reader.read_u32("transaction locktime")?;
+        Ok(Self {
+            version,
+            inputs,
+            outputs,
+            lock_time,
+        })
     }
 
     /// Returns the serialized transaction size in bytes (wire format).
@@ -196,5 +250,11 @@ mod tests {
 
         let serialized = tx.serialize();
         assert_eq!(&serialized[41..44], &[0xfd, 0xfd, 0x00]);
+    }
+
+    #[test]
+    fn legacy_transaction_roundtrips_wire_encoding() {
+        let tx = Transaction::coinbase(1, 50_0000_0000);
+        assert_eq!(Transaction::deserialize(&tx.serialize()), Ok(tx));
     }
 }

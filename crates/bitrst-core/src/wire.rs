@@ -23,6 +23,24 @@ pub enum DecodeError {
         /// Decoded integer value.
         value: u64,
     },
+    /// A decoded length exceeded its configured safety limit.
+    #[error("{context} length {actual} exceeds limit {limit}")]
+    LimitExceeded {
+        /// Name of the field being decoded.
+        context: &'static str,
+        /// Decoded length.
+        actual: u64,
+        /// Maximum accepted length.
+        limit: usize,
+    },
+    /// Bytes remained after a complete top-level value.
+    #[error("trailing bytes after {context}: {remaining}")]
+    TrailingBytes {
+        /// Name of the top-level value.
+        context: &'static str,
+        /// Number of unconsumed bytes.
+        remaining: usize,
+    },
 }
 
 pub(crate) struct WireReader<'a> {
@@ -38,6 +56,65 @@ impl<'a> WireReader<'a> {
     pub(crate) fn read_u32(&mut self, context: &'static str) -> Result<u32, DecodeError> {
         let bytes = self.read_array::<4>(context)?;
         Ok(u32::from_le_bytes(bytes))
+    }
+
+    pub(crate) fn read_i32(&mut self, context: &'static str) -> Result<i32, DecodeError> {
+        Ok(i32::from_le_bytes(self.read_array(context)?))
+    }
+
+    pub(crate) fn read_u64(&mut self, context: &'static str) -> Result<u64, DecodeError> {
+        Ok(u64::from_le_bytes(self.read_array(context)?))
+    }
+
+    pub(crate) fn read_bytes(
+        &mut self,
+        length: usize,
+        context: &'static str,
+    ) -> Result<&'a [u8], DecodeError> {
+        let remaining = self.remaining();
+        if remaining < length {
+            return Err(DecodeError::Truncated {
+                context,
+                needed: length,
+                remaining,
+            });
+        }
+        let start = self.position;
+        self.position += length;
+        Ok(&self.bytes[start..self.position])
+    }
+
+    pub(crate) fn read_limited_len(
+        &mut self,
+        context: &'static str,
+        limit: usize,
+    ) -> Result<usize, DecodeError> {
+        let value = self.read_compact_size(context)?;
+        let length = usize::try_from(value).map_err(|_| DecodeError::LimitExceeded {
+            context,
+            actual: value,
+            limit,
+        })?;
+        if length > limit {
+            return Err(DecodeError::LimitExceeded {
+                context,
+                actual: value,
+                limit,
+            });
+        }
+        Ok(length)
+    }
+
+    pub(crate) fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.position)
+    }
+
+    pub(crate) fn finish(self, context: &'static str) -> Result<(), DecodeError> {
+        let remaining = self.remaining();
+        if remaining != 0 {
+            return Err(DecodeError::TrailingBytes { context, remaining });
+        }
+        Ok(())
     }
 
     pub(crate) fn read_compact_size(
