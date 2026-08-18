@@ -7,16 +7,16 @@ use std::time::Duration;
 use bitrst_net::constants::{DEFAULT_MAX_INBOUND, DEFAULT_MAX_OUTBOUND};
 use bitrst_net::{PeerManager, PeerManagerConfig, SeedStrategy};
 use clap::Args;
-use tokio::net::TcpListener;
 
 use super::args::{resolve_network_time, NetworkArg};
 use super::chain::{ephemeral_chain, DEFAULT_BITS, EPHEMERAL_NOTICE, GENESIS_TIME};
 use super::error::CliError;
+use super::shutdown;
 
 /// Arguments for `bitrst node`.
 #[derive(Debug, Args)]
 pub struct NodeArgs {
-    /// Address to bind for inbound P2P connections.
+    /// Address to bind for inbound P2P connections (`0` requests an ephemeral port).
     #[arg(long, default_value = "127.0.0.1:8333")]
     pub listen: SocketAddr,
 
@@ -48,7 +48,7 @@ pub struct NodeArgs {
 /// Configuration assembled from CLI args for dependency injection in tests.
 #[derive(Debug, Clone)]
 pub struct NodeRunConfig {
-    /// Resolved listen address (port `0` is resolved before bind).
+    /// Listen address passed to the peer manager (port `0` binds ephemerally).
     pub listen: SocketAddr,
     /// Selected Bitcoin network.
     pub network: NetworkArg,
@@ -85,16 +85,15 @@ impl NodeArgs {
     }
 }
 
-/// Runs the node until `shutdown` completes.
+/// Runs the node until `shutdown` completes, then shuts down peers gracefully.
 pub async fn run(
     config: NodeRunConfig,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), CliError> {
     let chain = ephemeral_chain(config.network_time.max(GENESIS_TIME), DEFAULT_BITS)?;
-    let listen = resolve_listen_addr(config.listen).await?;
     let peer_config = PeerManagerConfig {
         network: config.network.p2p_network(),
-        listen_addr: listen,
+        listen_addr: config.listen,
         max_inbound: config.max_inbound,
         max_outbound: config.max_outbound,
         seeds: config.seed_strategy,
@@ -102,16 +101,29 @@ pub async fn run(
 
     let mut manager = PeerManager::new(chain, peer_config);
     manager.start_listener().await?;
+    let listen = manager
+        .listen_addr()
+        .ok_or_else(|| CliError::Io("listener did not report bound address".to_string()))?;
     manager.spawn_acceptor();
 
     if config.connect_seeds {
-        let _ = manager.connect_seeds().await;
+        let report = manager.connect_seeds_report().await;
+        for (addr, error) in &report.failures {
+            eprintln!("seed connection failed for {addr}: {error}");
+        }
+        if let Some(addr) = report.connected {
+            eprintln!("connected to seed {addr}");
+        } else if !report.failures.is_empty() {
+            return Err(CliError::Net(report.into_result().unwrap_err()));
+        }
     }
 
     eprintln!("listening on {listen} ({})", config.network.label());
     eprintln!("{EPHEMERAL_NOTICE}");
 
-    run_poll_loop(&mut manager, shutdown).await
+    let poll_result = run_poll_loop(&mut manager, shutdown).await;
+    manager.shutdown().await?;
+    poll_result
 }
 
 /// Polls the peer manager until `shutdown` fires.
@@ -134,28 +146,18 @@ pub async fn run_poll_loop(
     Ok(())
 }
 
-/// Resolves port `0` to an ephemeral free port before the peer manager binds.
-async fn resolve_listen_addr(addr: SocketAddr) -> Result<SocketAddr, CliError> {
-    if addr.port() != 0 {
-        return Ok(addr);
-    }
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|error| CliError::Io(error.to_string()))?;
-    listener
-        .local_addr()
-        .map_err(|error| CliError::Io(error.to_string()))
+/// Default shutdown future for the node binary (Ctrl-C / SIGTERM).
+pub async fn default_shutdown_signal() {
+    shutdown::wait_for_shutdown_signal().await;
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
-
-    use tokio::sync::Notify;
 
     use super::{run, NodeArgs, NodeRunConfig};
     use crate::cli::args::NetworkArg;
+    use crate::cli::shutdown::ShutdownTrigger;
     use bitrst_net::SeedStrategy;
 
     #[test]
@@ -176,14 +178,8 @@ mod tests {
 
     #[tokio::test]
     async fn node_starts_and_shuts_down_on_signal() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        drop(listener);
-
         let config = NodeRunConfig {
-            listen: format!("127.0.0.1:{port}").parse().expect("addr"),
+            listen: "127.0.0.1:0".parse().expect("addr"),
             network: NetworkArg::Testnet,
             max_inbound: 2,
             max_outbound: 0,
@@ -192,21 +188,39 @@ mod tests {
             connect_seeds: false,
         };
 
-        let shutdown = Arc::new(Notify::new());
-        let shutdown_for_node = Arc::clone(&shutdown);
-        let node = run(config, async move {
-            shutdown_for_node.notified().await;
-        });
+        let (trigger, wait) = ShutdownTrigger::pair();
+        let node = run(config, wait);
 
-        let shutdown_for_task = Arc::clone(&shutdown);
+        let trigger_for_task = trigger.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            shutdown_for_task.notify_waiters();
+            trigger_for_task.signal();
         });
 
         tokio::time::timeout(Duration::from_secs(5), node)
             .await
             .expect("timeout")
             .expect("node run");
+    }
+
+    #[tokio::test]
+    async fn node_shutdown_survives_immediate_signal_stress() {
+        for _ in 0..16 {
+            let config = NodeRunConfig {
+                listen: "127.0.0.1:0".parse().expect("addr"),
+                network: NetworkArg::Testnet,
+                max_inbound: 1,
+                max_outbound: 0,
+                seed_strategy: SeedStrategy::Fixed(vec![]),
+                network_time: 1_231_006_505,
+                connect_seeds: false,
+            };
+            let (trigger, wait) = ShutdownTrigger::pair();
+            trigger.signal();
+            tokio::time::timeout(Duration::from_secs(5), run(config, wait))
+                .await
+                .expect("timeout")
+                .expect("node run");
+        }
     }
 }

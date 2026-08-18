@@ -4,6 +4,7 @@ use bitrst_wallet::{Address, PrivateKey};
 
 use crate::cli::args::NetworkArg;
 use crate::cli::error::CliError;
+use crate::cli::secret::resolve_private_key_hex;
 
 /// Runs `wallet new`.
 pub fn run_new(
@@ -15,7 +16,19 @@ pub fn run_new(
     write_address_output(network, &key, show_secret, out)
 }
 
-/// Runs `wallet address` (derive from supplied private key hex).
+/// Derives an address from stdin, environment, or argv private key sources.
+pub fn run_derive_from_sources(
+    network: NetworkArg,
+    private_key: Option<&str>,
+    private_key_stdin: bool,
+    show_secret: bool,
+    out: &mut impl std::io::Write,
+) -> Result<(), CliError> {
+    let hex_str = resolve_private_key_hex(private_key, private_key_stdin)?;
+    run_derive(network, &hex_str, show_secret, out)
+}
+
+/// Derives and prints a P2PKH address from hex-encoded private key bytes.
 pub fn run_derive(
     network: NetworkArg,
     private_key_hex: &str,

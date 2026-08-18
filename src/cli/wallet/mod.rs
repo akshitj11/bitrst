@@ -29,9 +29,12 @@ pub enum WalletCommand {
     },
     /// Derive a P2PKH address from a 32-byte private key hex string.
     Address {
-        /// 32-byte secp256k1 private key in hex.
-        #[arg(long)]
-        private_key: String,
+        /// 32-byte secp256k1 private key in hex (visible in process list; prefer `--private-key-stdin`).
+        #[arg(long, conflicts_with = "private_key_stdin")]
+        private_key: Option<String>,
+        /// Read 32-byte private key hex from standard input.
+        #[arg(long, conflicts_with = "private_key")]
+        private_key_stdin: bool,
         /// Print the private key again (off by default).
         #[arg(long)]
         show_secret: bool,
@@ -49,8 +52,15 @@ pub fn run(
         WalletCommand::New { show_secret } => address::run_new(args.network, show_secret, out),
         WalletCommand::Address {
             private_key,
+            private_key_stdin,
             show_secret,
-        } => address::run_derive(args.network, &private_key, show_secret, out),
+        } => address::run_derive_from_sources(
+            args.network,
+            private_key.as_deref(),
+            private_key_stdin,
+            show_secret,
+            out,
+        ),
         WalletCommand::Balance(balance_args) => balance::run(args.network, balance_args, out),
     }
 }

@@ -5,6 +5,8 @@ pub mod chain;
 pub mod error;
 pub mod mine;
 pub mod node;
+pub mod secret;
+pub mod shutdown;
 pub mod tip;
 pub mod wallet;
 
@@ -68,12 +70,7 @@ pub fn run_parsed(cli: Cli) -> Result<(), CliError> {
                 .enable_all()
                 .build()
                 .map_err(|error| CliError::Io(error.to_string()))?;
-            runtime.block_on(async {
-                node::run(config, async {
-                    let _ = tokio::signal::ctrl_c().await;
-                })
-                .await
-            })
+            runtime.block_on(async { node::run(config, node::default_shutdown_signal()).await })
         }
     }
 }

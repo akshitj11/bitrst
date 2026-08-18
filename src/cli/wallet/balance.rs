@@ -4,8 +4,8 @@ use bitrst_crypto::base58;
 use bitrst_wallet::{Address, Wallet};
 use clap::Args;
 
-use crate::cli::args::NetworkArg;
-use crate::cli::chain::{ephemeral_chain, DEFAULT_BITS, EPHEMERAL_NOTICE, GENESIS_TIME};
+use crate::cli::args::{resolve_network_time, NetworkArg};
+use crate::cli::chain::{ephemeral_chain, DEFAULT_BITS, EPHEMERAL_NOTICE};
 use crate::cli::error::CliError;
 
 /// Arguments for `wallet balance`.
@@ -14,6 +14,10 @@ pub struct BalanceArgs {
     /// Base58Check P2PKH address to query.
     #[arg(long)]
     pub address: String,
+
+    /// Network-adjusted unix time for the ephemeral chain (defaults to current time).
+    #[arg(long)]
+    pub network_time: Option<u32>,
 }
 
 /// Parses and validates a P2PKH address for `network`.
@@ -39,7 +43,8 @@ pub fn run(
     out: &mut impl std::io::Write,
 ) -> Result<(), CliError> {
     let address = parse_address(&args.address, network)?;
-    let handle = ephemeral_chain(GENESIS_TIME, DEFAULT_BITS)?;
+    let network_time = resolve_network_time(args.network_time)?;
+    let handle = ephemeral_chain(network_time, DEFAULT_BITS)?;
     let mut wallet = Wallet::new();
     wallet.watch_address(address.clone());
     let events = handle.take_events()?;
@@ -74,6 +79,7 @@ mod tests {
             NetworkArg::Mainnet,
             BalanceArgs {
                 address: "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH".to_string(),
+                network_time: Some(1_231_006_505),
             },
             &mut out,
         )
@@ -81,5 +87,23 @@ mod tests {
         let text = String::from_utf8(out).expect("utf8");
         assert!(text.contains("balance_satoshis: 0"));
         assert!(text.contains("ephemeral in-memory chain"));
+    }
+
+    #[test]
+    fn balance_rejects_zero_network_time() {
+        let mut out = Vec::new();
+        let err = run(
+            NetworkArg::Mainnet,
+            BalanceArgs {
+                address: "1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH".to_string(),
+                network_time: Some(0),
+            },
+            &mut out,
+        )
+        .expect_err("zero time");
+        assert!(matches!(
+            err,
+            crate::cli::error::CliError::InvalidNetworkTime
+        ));
     }
 }
