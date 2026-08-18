@@ -68,6 +68,12 @@ impl ChainHandle {
         Ok(self.read()?.block_by_hash(hash))
     }
 
+    /// Invokes `f` with shared read access to the active chain state.
+    pub fn with_chain<R>(&self, f: impl FnOnce(&Chain) -> R) -> Result<R, ChainError> {
+        let guard = self.read()?;
+        Ok(f(&guard))
+    }
+
     fn read(&self) -> Result<RwLockReadGuard<'_, Chain>, ChainError> {
         self.inner.read().map_err(|_| ChainError::LockPoisoned)
     }
