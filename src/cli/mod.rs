@@ -69,12 +69,9 @@ pub fn run_parsed(cli: Cli) -> Result<(), CliError> {
                 .build()
                 .map_err(|error| CliError::Io(error.to_string()))?;
             runtime.block_on(async {
-                node::run(
-                    config,
-                    async {
-                        let _ = tokio::signal::ctrl_c().await;
-                    },
-                )
+                node::run(config, async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
                 .await
             })
         }

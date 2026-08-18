@@ -149,9 +149,10 @@ async fn resolve_listen_addr(addr: SocketAddr) -> Result<SocketAddr, CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use tokio::sync::oneshot;
+    use tokio::sync::Notify;
 
     use super::{run, NodeArgs, NodeRunConfig};
     use crate::cli::args::NetworkArg;
@@ -191,14 +192,16 @@ mod tests {
             connect_seeds: false,
         };
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let node = run(config, async {
-            let _ = shutdown_rx.await;
+        let shutdown = Arc::new(Notify::new());
+        let shutdown_for_node = Arc::clone(&shutdown);
+        let node = run(config, async move {
+            shutdown_for_node.notified().await;
         });
 
+        let shutdown_for_task = Arc::clone(&shutdown);
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let _ = shutdown_tx.send(());
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            shutdown_for_task.notify_waiters();
         });
 
         tokio::time::timeout(Duration::from_secs(5), node)
