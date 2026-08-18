@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use bitrst_core::ChainHandle;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 
 use crate::codec::default_version_message;
 use crate::constants::{Network, MAX_OUTBOUND_QUEUE};
@@ -106,14 +106,14 @@ async fn run_peer(
         }
     }
 
-    let handshake_deadline = handshake.timeout();
+    let handshake_deadline = Instant::now() + handshake_config.timeout;
     while handshake.phase() != HandshakePhase::Established {
-        let message = timeout(
+        let message = timeout_at(
             handshake_deadline,
             framed.read_message(&mut read_half, network),
         )
         .await
-        .map_err(|_| NetError::HandshakeTimeout(handshake_deadline))??;
+        .map_err(|_| NetError::HandshakeTimeout(handshake_config.timeout))??;
 
         let replies = handshake.on_message(
             &message,
