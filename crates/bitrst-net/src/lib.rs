@@ -20,3 +20,5 @@ pub mod codec;
 /// Version/verack handshake state machine.
 pub mod handshake;
 pub use handshake::{ConnectionDirection, HandshakeConfig, HandshakePhase, HandshakeState};
+/// Async framed reader and writer helpers.
+pub mod framing;
