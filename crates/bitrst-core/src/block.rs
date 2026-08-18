@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::merkle::merkle_root;
 use crate::transaction::{write_compact_size, Transaction};
+use crate::wire::{DecodeError, WireReader};
 
 /// A Bitcoin block header in wire-serialization field order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,30 @@ impl BlockHeader {
         out[72..76].copy_from_slice(&self.bits.to_le_bytes());
         out[76..80].copy_from_slice(&self.nonce.to_le_bytes());
         out
+    }
+
+    /// Decodes one complete 80-byte Bitcoin block header.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut reader = WireReader::new(bytes);
+        let header = Self::decode_from(&mut reader)?;
+        reader.finish("block header")?;
+        Ok(header)
+    }
+
+    fn decode_from(reader: &mut WireReader<'_>) -> Result<Self, DecodeError> {
+        let version = reader.read_i32("block version")?;
+        let mut prev_blockhash = [0; 32];
+        prev_blockhash.copy_from_slice(reader.read_bytes(32, "previous block hash")?);
+        let mut merkle_root = [0; 32];
+        merkle_root.copy_from_slice(reader.read_bytes(32, "merkle root")?);
+        Ok(Self {
+            version,
+            prev_blockhash,
+            merkle_root,
+            time: reader.read_u32("block time")?,
+            bits: reader.read_u32("block bits")?,
+            nonce: reader.read_u32("block nonce")?,
+        })
     }
 
     /// Returns the SHA-256d hash of this serialized block header.
@@ -176,6 +201,19 @@ mod tests {
             to_bitcoin_hex(header.hash()),
             "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
         );
+    }
+
+    #[test]
+    fn decodes_genesis_header_vector() {
+        let bytes = hex::decode(concat!(
+            "010000000000000000000000000000000000000000000000000000000000000000000000",
+            "3ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a",
+            "29ab5f49ffff001d1dac2b7c"
+        ))
+        .expect("valid hex");
+        let header = BlockHeader::deserialize(&bytes).expect("valid genesis header");
+        assert_eq!(header.nonce, 2_083_236_893);
+        assert_eq!(header.serialize().as_slice(), bytes);
     }
 
     #[test]
