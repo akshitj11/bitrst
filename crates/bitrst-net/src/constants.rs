@@ -31,6 +31,17 @@ pub const DEFAULT_MAX_INBOUND: usize = 8;
 /// Default maximum simultaneous outbound peers.
 pub const DEFAULT_MAX_OUTBOUND: usize = 8;
 
+/// Maximum outstanding block `getdata` requests tracked per peer.
+pub const MAX_PENDING_BLOCK_REQUESTS: usize = 256;
+
+/// Time after which an outstanding block request may be retried.
+#[cfg(feature = "test-short-period")]
+pub const BLOCK_REQUEST_TTL: Duration = Duration::from_secs(30);
+
+/// Time after which an outstanding block request may be retried.
+#[cfg(not(feature = "test-short-period"))]
+pub const BLOCK_REQUEST_TTL: Duration = Duration::from_secs(300);
+
 /// Maximum pending peer events buffered by the manager.
 pub const MAX_PEER_EVENTS: usize = 256;
 
