@@ -92,8 +92,13 @@ impl Transaction {
 
     /// Decodes one complete legacy (non-SegWit) Bitcoin transaction.
     ///
-    /// Counts and scripts are bounded before allocation, non-canonical
-    /// CompactSize values are rejected, and trailing bytes are not accepted.
+    /// The input must contain exactly one transaction. Before allocating, this
+    /// checks the total serialized-size ceiling and dedicated input, output,
+    /// and script limits. It also rejects truncated fields, non-canonical
+    /// CompactSize values, and trailing bytes.
+    ///
+    /// SegWit marker/flag encoding and witness stacks are intentionally outside
+    /// this legacy codec.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() > MAX_TRANSACTION_SERIALIZED_SIZE {
             return Err(DecodeError::LimitExceeded {

@@ -39,6 +39,9 @@ impl BlockHeader {
     }
 
     /// Decodes one complete 80-byte Bitcoin block header.
+    ///
+    /// Short inputs return [`DecodeError::Truncated`]; inputs longer than 80
+    /// bytes return [`DecodeError::TrailingBytes`].
     pub fn deserialize(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut reader = WireReader::new(bytes);
         let header = Self::decode_from(&mut reader)?;
@@ -136,6 +139,12 @@ impl Block {
     }
 
     /// Decodes one complete, size-bounded Bitcoin block.
+    ///
+    /// The input must contain exactly one legacy block. Its total byte length
+    /// and transaction count are checked before their respective allocations;
+    /// nested transactions apply their own input, output, and script limits.
+    /// Truncation, non-canonical CompactSize values, and trailing bytes are
+    /// rejected.
     pub fn deserialize(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() > MAX_BLOCK_SERIALIZED_SIZE {
             return Err(DecodeError::LimitExceeded {

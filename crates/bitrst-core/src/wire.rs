@@ -1,8 +1,16 @@
-//! Safe, bounded decoding helpers for Bitcoin's legacy wire format.
+//! Safe, bounded decoding support for Bitcoin's legacy wire format.
+//!
+//! Public domain types expose `deserialize` methods while this module provides
+//! their shared [`DecodeError`]. Decoders reject truncated input,
+//! non-canonical CompactSize integers, configured resource-limit violations,
+//! and bytes trailing a complete top-level value.
 
 use thiserror::Error;
 
 /// Error returned when untrusted Bitcoin wire bytes cannot be decoded safely.
+///
+/// Each variant carries a static field context so callers can distinguish
+/// malformed structure from resource-limit rejection without parsing messages.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum DecodeError {
     /// The input ended before the named field was complete.
@@ -158,6 +166,15 @@ impl<'a> WireReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::WireReader;
+
+    #[test]
+    fn decode_error_is_available_at_crate_root() {
+        let error: crate::DecodeError = super::DecodeError::TrailingBytes {
+            context: "test",
+            remaining: 1,
+        };
+        assert_eq!(error.to_string(), "trailing bytes after test: 1");
+    }
 
     #[test]
     fn bounded_reader_rejects_truncated_values() {
