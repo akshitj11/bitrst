@@ -1,0 +1,19 @@
+[package]
+name = "bitrst-net"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+bitrst-core = { path = "../bitrst-core" }
+bitrst-crypto = { path = "../bitrst-crypto" }
+bytes = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+
+[features]
+test-short-period = []
+
+[dev-dependencies]
+hex = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "test-util"] }
