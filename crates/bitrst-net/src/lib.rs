@@ -17,3 +17,6 @@ pub mod message;
 pub use message::{InventoryVector, InvType, Message, MessagePayload, VersionMessage};
 /// Message payload codecs.
 pub mod codec;
+/// Version/verack handshake state machine.
+pub mod handshake;
+pub use handshake::{ConnectionDirection, HandshakeConfig, HandshakePhase, HandshakeState};
