@@ -4,6 +4,7 @@ use bitrst_crypto::sha256d::sha256d;
 use serde::{Deserialize, Serialize};
 
 use crate::merkle::merkle_root;
+use crate::limits::{MAX_BLOCK_SERIALIZED_SIZE, MAX_TRANSACTIONS_PER_BLOCK};
 use crate::transaction::{write_compact_size, Transaction};
 use crate::wire::{DecodeError, WireReader};
 
@@ -134,6 +135,30 @@ impl Block {
         out
     }
 
+    /// Decodes one complete, size-bounded Bitcoin block.
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() > MAX_BLOCK_SERIALIZED_SIZE {
+            return Err(DecodeError::LimitExceeded {
+                context: "block size",
+                actual: bytes.len() as u64,
+                limit: MAX_BLOCK_SERIALIZED_SIZE,
+            });
+        }
+        let mut reader = WireReader::new(bytes);
+        let header = BlockHeader::decode_from(&mut reader)?;
+        let count =
+            reader.read_limited_len("block transaction count", MAX_TRANSACTIONS_PER_BLOCK)?;
+        let mut transactions = Vec::with_capacity(count);
+        for _ in 0..count {
+            transactions.push(Transaction::decode_from(&mut reader)?);
+        }
+        reader.finish("block")?;
+        Ok(Self {
+            header,
+            transactions,
+        })
+    }
+
     /// Returns the block hash (SHA-256d of the header only).
     pub fn hash(&self) -> [u8; 32] {
         self.header.hash()
@@ -253,6 +278,12 @@ mod tests {
             80 + 1 + block.transactions[0].serialize().len()
         );
         assert_eq!(&serialized[..80], block.header.serialize());
+    }
+
+    #[test]
+    fn block_roundtrips_wire_encoding() {
+        let block = Block::coinbase(sample_header(), 1, 50_0000_0000);
+        assert_eq!(Block::deserialize(&block.serialize()), Ok(block));
     }
 
     #[test]
