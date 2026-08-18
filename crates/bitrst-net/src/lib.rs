@@ -9,3 +9,6 @@ pub use constants::Network;
 /// Networking error types.
 pub mod error;
 pub use error::NetError;
+/// 24-byte message header handling.
+pub mod envelope;
+pub use envelope::{checksum, Command, MessageHeader};
