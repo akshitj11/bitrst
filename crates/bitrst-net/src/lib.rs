@@ -15,3 +15,5 @@ pub use envelope::{checksum, Command, MessageHeader};
 /// Message and inventory types.
 pub mod message;
 pub use message::{InventoryVector, InvType, Message, MessagePayload, VersionMessage};
+/// Message payload codecs.
+pub mod codec;
