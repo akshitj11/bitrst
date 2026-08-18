@@ -28,6 +28,8 @@ pub mod transaction;
 pub mod uint256;
 /// UTXO set types and mutation helpers.
 pub mod utxo;
+/// Safe, bounded Bitcoin wire-format decoding.
+pub mod wire;
 
 pub use block::{Block, BlockHeader};
 pub use chain::{block_work, Chain, ChainError, ChainWork, ConnectResult};
