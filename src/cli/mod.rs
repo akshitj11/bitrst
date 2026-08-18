@@ -4,6 +4,7 @@ pub mod args;
 pub mod chain;
 pub mod error;
 pub mod mine;
+pub mod node;
 pub mod tip;
 pub mod wallet;
 
@@ -14,6 +15,7 @@ use clap::{Parser, Subcommand};
 
 use self::error::CliError;
 
+/// Top-level CLI definition.
 #[derive(Debug, Parser)]
 #[command(
     name = "bitrst",
@@ -25,6 +27,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// Available subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Print the active chain tip hash (hex, internal byte order).
@@ -33,16 +36,21 @@ pub enum Commands {
     Mine(mine::MineArgs),
     /// Wallet key and balance helpers (ephemeral chain context).
     Wallet(wallet::WalletArgs),
+    /// Run a P2P node on an ephemeral local chain.
+    Node(node::NodeArgs),
 }
 
+/// Parses CLI arguments from `args` and runs the selected subcommand.
 pub fn run_from<I, T>(args: I) -> Result<(), CliError>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
-    run_parsed(Cli::try_parse_from(args)?)
+    let cli = Cli::try_parse_from(args)?;
+    run_parsed(cli)
 }
 
+/// Runs an already-parsed CLI command.
 pub fn run_parsed(cli: Cli) -> Result<(), CliError> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -53,6 +61,23 @@ pub fn run_parsed(cli: Cli) -> Result<(), CliError> {
             Ok(())
         }
         Commands::Wallet(args) => wallet::run(args, &mut out),
+        Commands::Node(args) => {
+            drop(out);
+            let config = args.into_run_config()?;
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| CliError::Io(error.to_string()))?;
+            runtime.block_on(async {
+                node::run(
+                    config,
+                    async {
+                        let _ = tokio::signal::ctrl_c().await;
+                    },
+                )
+                .await
+            })
+        }
     }
 }
 
@@ -87,6 +112,7 @@ mod tests {
         match cli.command {
             Commands::Mine(args) => {
                 assert_eq!(args.count, 3);
+                assert_eq!(args.value, 100_000_000);
                 assert_eq!(args.bits, 0x1f00_ffff);
             }
             _ => panic!("expected mine"),
@@ -97,6 +123,27 @@ mod tests {
     fn cli_parses_wallet_new() {
         let cli = Cli::try_parse_from(["bitrst", "wallet", "new"]).expect("parse");
         assert!(matches!(cli.command, Commands::Wallet(_)));
+    }
+
+    #[test]
+    fn cli_parses_node_with_listen() {
+        let cli = Cli::try_parse_from([
+            "bitrst",
+            "node",
+            "--listen",
+            "127.0.0.1:0",
+            "--network",
+            "testnet",
+            "--no-connect-seeds",
+        ])
+        .expect("parse");
+        match cli.command {
+            Commands::Node(args) => {
+                assert_eq!(args.listen.port(), 0);
+                assert!(args.no_connect_seeds);
+            }
+            _ => panic!("expected node"),
+        }
     }
 
     #[test]
