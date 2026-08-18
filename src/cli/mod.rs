@@ -5,6 +5,7 @@ pub mod chain;
 pub mod error;
 pub mod mine;
 pub mod tip;
+pub mod wallet;
 
 use std::ffi::OsString;
 use std::io;
@@ -30,9 +31,10 @@ pub enum Commands {
     Tip(tip::TipArgs),
     /// Mine one or more blocks on an ephemeral local chain.
     Mine(mine::MineArgs),
+    /// Wallet key and balance helpers (ephemeral chain context).
+    Wallet(wallet::WalletArgs),
 }
 
-/// Parses CLI arguments from `args` and runs the selected subcommand.
 pub fn run_from<I, T>(args: I) -> Result<(), CliError>
 where
     I: IntoIterator<Item = T>,
@@ -41,7 +43,6 @@ where
     run_parsed(Cli::try_parse_from(args)?)
 }
 
-/// Runs an already-parsed CLI command.
 pub fn run_parsed(cli: Cli) -> Result<(), CliError> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -51,6 +52,7 @@ pub fn run_parsed(cli: Cli) -> Result<(), CliError> {
             let _ = mine::run(args, &mut out)?;
             Ok(())
         }
+        Commands::Wallet(args) => wallet::run(args, &mut out),
     }
 }
 
@@ -65,7 +67,7 @@ mod tests {
             Cli::try_parse_from(["bitrst", "tip", "--network-time", "1700000000"]).expect("parse");
         match cli.command {
             Commands::Tip(args) => assert_eq!(args.network_time, Some(1_700_000_000)),
-            Commands::Mine(_) => panic!("expected tip"),
+            _ => panic!("expected tip"),
         }
     }
 
@@ -87,8 +89,14 @@ mod tests {
                 assert_eq!(args.count, 3);
                 assert_eq!(args.bits, 0x1f00_ffff);
             }
-            Commands::Tip(_) => panic!("expected mine"),
+            _ => panic!("expected mine"),
         }
+    }
+
+    #[test]
+    fn cli_parses_wallet_new() {
+        let cli = Cli::try_parse_from(["bitrst", "wallet", "new"]).expect("parse");
+        assert!(matches!(cli.command, Commands::Wallet(_)));
     }
 
     #[test]
