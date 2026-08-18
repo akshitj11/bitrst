@@ -15,6 +15,14 @@ pub enum DecodeError {
         /// Number of bytes still available.
         remaining: usize,
     },
+    /// A CompactSize integer used a longer encoding than required.
+    #[error("non-canonical CompactSize for {context}: {value}")]
+    NonCanonicalCompactSize {
+        /// Name of the field being decoded.
+        context: &'static str,
+        /// Decoded integer value.
+        value: u64,
+    },
 }
 
 pub(crate) struct WireReader<'a> {
@@ -36,12 +44,22 @@ impl<'a> WireReader<'a> {
         &mut self,
         context: &'static str,
     ) -> Result<u64, DecodeError> {
-        match self.read_array::<1>(context)?[0] {
-            value @ 0..=0xfc => Ok(u64::from(value)),
-            0xfd => Ok(u64::from(u16::from_le_bytes(self.read_array(context)?))),
-            0xfe => Ok(u64::from(u32::from_le_bytes(self.read_array(context)?))),
-            0xff => Ok(u64::from_le_bytes(self.read_array(context)?)),
+        let (value, minimum) = match self.read_array::<1>(context)?[0] {
+            value @ 0..=0xfc => return Ok(u64::from(value)),
+            0xfd => (
+                u64::from(u16::from_le_bytes(self.read_array(context)?)),
+                0xfd,
+            ),
+            0xfe => (
+                u64::from(u32::from_le_bytes(self.read_array(context)?)),
+                0x1_0000,
+            ),
+            0xff => (u64::from_le_bytes(self.read_array(context)?), 0x1_0000_0000),
+        };
+        if value < minimum {
+            return Err(DecodeError::NonCanonicalCompactSize { context, value });
         }
+        Ok(value)
     }
 
     fn read_array<const N: usize>(
@@ -85,6 +103,20 @@ mod tests {
                 WireReader::new(bytes).read_compact_size("count"),
                 Ok(expected)
             );
+        }
+    }
+
+    #[test]
+    fn compact_size_rejects_non_canonical_encodings() {
+        for bytes in [
+            &[0xfd, 0xfc, 0x00][..],
+            &[0xfe, 0xff, 0xff, 0x00, 0x00],
+            &[0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0],
+        ] {
+            assert!(matches!(
+                WireReader::new(bytes).read_compact_size("count"),
+                Err(super::DecodeError::NonCanonicalCompactSize { .. })
+            ));
         }
     }
 }
