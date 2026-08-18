@@ -56,6 +56,14 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(feature = "test-short-period"))]
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Maximum time to wait for peer tasks and the accept loop during shutdown.
+#[cfg(feature = "test-short-period")]
+pub const PEER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Maximum time to wait for peer tasks and the accept loop during shutdown.
+#[cfg(not(feature = "test-short-period"))]
+pub const PEER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Bitcoin network selection for magic bytes and seeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Network {

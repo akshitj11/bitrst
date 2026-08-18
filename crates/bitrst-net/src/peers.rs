@@ -6,11 +6,13 @@ use std::sync::Arc;
 
 use bitrst_core::ChainHandle;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use crate::constants::{
     Network, DEFAULT_MAX_INBOUND, DEFAULT_MAX_OUTBOUND, MAX_PEER_EVENTS, MAX_PEER_REGISTRATIONS,
+    PEER_SHUTDOWN_TIMEOUT,
 };
 use crate::error::NetError;
 use crate::handshake::{ConnectionDirection, HandshakeConfig};
@@ -68,6 +70,40 @@ struct PeerRegistration {
     task: JoinHandle<()>,
 }
 
+/// Outcome of attempting configured seed connections.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SeedConnectReport {
+    /// First seed that connected successfully, if any.
+    pub connected: Option<SocketAddr>,
+    /// Per-seed connection failures in attempt order.
+    pub failures: Vec<(SocketAddr, NetError)>,
+}
+
+impl SeedConnectReport {
+    /// Returns the connected seed address when one succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::SeedsExhausted`] when every seed attempt failed.
+    pub fn into_result(self) -> Result<SocketAddr, NetError> {
+        if let Some(addr) = self.connected {
+            return Ok(addr);
+        }
+        Err(NetError::SeedsExhausted {
+            attempted: self.failures.len(),
+            details: format_seed_failures(&self.failures),
+        })
+    }
+}
+
+fn format_seed_failures(failures: &[(SocketAddr, NetError)]) -> String {
+    failures
+        .iter()
+        .map(|(addr, error)| format!("{addr}: {error}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Manages peer connections and relays inventory announcements.
 pub struct PeerManager {
     chain: ChainHandle,
@@ -75,7 +111,11 @@ pub struct PeerManager {
     outbound_count: usize,
     peers: HashMap<SocketAddr, PeerEntry>,
     listener: Option<TcpListener>,
+    bound_listen_addr: Option<SocketAddr>,
     accept_handle: Option<JoinHandle<()>>,
+    shutdown_tx: watch::Sender<bool>,
+    shutdown_rx: watch::Receiver<bool>,
+    shutting_down: bool,
     event_tx: mpsc::Sender<PeerEvent>,
     event_rx: mpsc::Receiver<PeerEvent>,
     register_tx: mpsc::Sender<PeerRegistration>,
@@ -89,6 +129,7 @@ impl PeerManager {
     pub fn new(chain: ChainHandle, config: PeerManagerConfig) -> Self {
         let (event_tx, event_rx) = mpsc::channel(MAX_PEER_EVENTS);
         let (register_tx, register_rx) = mpsc::channel(MAX_PEER_REGISTRATIONS);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let inbound_capacity = InboundCapacity::new(config.max_inbound);
         Self {
             chain,
@@ -96,13 +137,23 @@ impl PeerManager {
             outbound_count: 0,
             peers: HashMap::new(),
             listener: None,
+            bound_listen_addr: None,
             accept_handle: None,
+            shutdown_tx,
+            shutdown_rx,
+            shutting_down: false,
             event_tx,
             event_rx,
             register_tx,
             register_rx,
             inbound_capacity,
         }
+    }
+
+    /// Returns the bound listen address after [`Self::start_listener`].
+    #[must_use]
+    pub fn listen_addr(&self) -> Option<SocketAddr> {
+        self.bound_listen_addr
     }
 
     /// Starts listening for inbound connections.
@@ -114,6 +165,7 @@ impl PeerManager {
         let listener = TcpListener::bind(self.config.listen_addr)
             .await
             .map_err(|_| NetError::Io("bind listener"))?;
+        self.bound_listen_addr = listener.local_addr().ok();
         self.listener = Some(listener);
         Ok(())
     }
@@ -128,9 +180,22 @@ impl PeerManager {
         let chain = self.chain.clone();
         let network = self.config.network;
         let inbound_capacity = Arc::clone(&self.inbound_capacity);
+        let mut shutdown_rx = self.shutdown_rx.clone();
         let accept_handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, addr)) = listener.accept().await else {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                let accept = tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_ok() && *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    accept = listener.accept() => accept,
+                };
+                let Ok((stream, addr)) = accept else {
                     break;
                 };
                 let Some(guard) = inbound_capacity.try_acquire() else {
@@ -209,18 +274,33 @@ impl PeerManager {
         Ok(())
     }
 
+    /// Attempts each configured seed and returns a per-attempt report.
+    pub async fn connect_seeds_report(&mut self) -> SeedConnectReport {
+        let mut failures = Vec::new();
+        for addr in self.config.seeds.addresses(self.config.network) {
+            match self.connect_seed(addr).await {
+                Ok(()) => {
+                    return SeedConnectReport {
+                        connected: Some(addr),
+                        failures,
+                    };
+                }
+                Err(error) => failures.push((addr, error)),
+            }
+        }
+        SeedConnectReport {
+            connected: None,
+            failures,
+        }
+    }
+
     /// Connects to configured seeds sequentially.
     ///
     /// # Errors
     ///
-    /// Returns [`NetError`] when no seed address connects successfully.
-    pub async fn connect_seeds(&mut self) -> Result<(), NetError> {
-        for addr in self.config.seeds.addresses(self.config.network) {
-            if self.connect_seed(addr).await.is_ok() {
-                return Ok(());
-            }
-        }
-        Err(NetError::Io("no seeds connected"))
+    /// Returns [`NetError::SeedsExhausted`] when no seed address connects successfully.
+    pub async fn connect_seeds(&mut self) -> Result<SocketAddr, NetError> {
+        self.connect_seeds_report().await.into_result()
     }
 
     /// Broadcasts inventory to ready peers except `origin`.
@@ -365,6 +445,65 @@ impl PeerManager {
     #[must_use]
     pub fn inbound_reserved(&self) -> usize {
         self.inbound_capacity.reserved()
+    }
+
+    /// Stops the accept loop, signals peers to shut down, and awaits tasks.
+    ///
+    /// This method is idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::TaskJoinFailed`] when a peer task does not finish in time.
+    pub async fn shutdown(&mut self) -> Result<(), NetError> {
+        if self.shutting_down {
+            return Ok(());
+        }
+        self.shutting_down = true;
+        let _ = self.shutdown_tx.send(true);
+
+        if let Some(handle) = self.accept_handle.take() {
+            let mut handle = handle;
+            if timeout(PEER_SHUTDOWN_TIMEOUT, &mut handle).await.is_err() {
+                handle.abort();
+            }
+        }
+
+        let peer_tasks: Vec<_> = self
+            .peers
+            .drain()
+            .map(|(_, entry)| (entry.command_tx, entry._task))
+            .collect();
+
+        for (command_tx, _) in &peer_tasks {
+            let _ = command_tx.send(PeerCommand::Shutdown).await;
+        }
+
+        for (_, task) in peer_tasks {
+            let mut task = task;
+            match timeout(PEER_SHUTDOWN_TIMEOUT, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return Err(NetError::TaskJoinFailed),
+                Err(_) => task.abort(),
+            }
+        }
+
+        self.outbound_count = 0;
+        Ok(())
+    }
+}
+
+impl Drop for PeerManager {
+    fn drop(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        let _ = self.shutdown_tx.send(true);
+        if let Some(handle) = self.accept_handle.take() {
+            handle.abort();
+        }
+        for (_, entry) in self.peers.drain() {
+            entry._task.abort();
+        }
     }
 }
 
@@ -617,6 +756,67 @@ mod tests {
         write_message(stream, Network::Testnet, &Message::verack())
             .await
             .expect("write verack");
+    }
+
+    #[tokio::test]
+    async fn start_listener_records_bound_addr_for_ephemeral_port() {
+        let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
+        let mut manager = PeerManager::new(
+            chain,
+            PeerManagerConfig {
+                network: Network::Testnet,
+                listen_addr: "127.0.0.1:0".parse().expect("addr"),
+                max_inbound: 1,
+                max_outbound: 0,
+                seeds: SeedStrategy::Fixed(vec![]),
+            },
+        );
+        manager.start_listener().await.expect("listen");
+        let bound = manager.listen_addr().expect("bound addr");
+        assert_ne!(bound.port(), 0);
+        manager.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_idempotent_and_clears_peers() {
+        let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
+        let mut manager = PeerManager::new(
+            chain,
+            PeerManagerConfig {
+                network: Network::Testnet,
+                listen_addr: "127.0.0.1:0".parse().expect("addr"),
+                max_inbound: 2,
+                max_outbound: 0,
+                seeds: SeedStrategy::Fixed(vec![]),
+            },
+        );
+        manager.start_listener().await.expect("listen");
+        manager.spawn_acceptor();
+        manager.shutdown().await.expect("shutdown");
+        assert_eq!(manager.peer_count(), 0);
+        manager.shutdown().await.expect("idempotent");
+    }
+
+    #[tokio::test]
+    async fn connect_seeds_report_collects_failures() {
+        let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
+        let mut manager = PeerManager::new(
+            chain,
+            PeerManagerConfig {
+                network: Network::Testnet,
+                listen_addr: "127.0.0.1:0".parse().expect("addr"),
+                max_inbound: 0,
+                max_outbound: 1,
+                seeds: SeedStrategy::Fixed(vec!["127.0.0.1:1".parse().expect("addr")]),
+            },
+        );
+        let report = manager.connect_seeds_report().await;
+        assert!(report.connected.is_none());
+        assert_eq!(report.failures.len(), 1);
+        assert!(matches!(
+            report.into_result(),
+            Err(crate::error::NetError::SeedsExhausted { .. })
+        ));
     }
 
     #[tokio::test]

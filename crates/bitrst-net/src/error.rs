@@ -90,6 +90,15 @@ pub enum NetError {
     #[error("chain error: {0}")]
     Chain(#[from] ChainError),
 
+    /// No configured seed address accepted a connection.
+    #[error("failed to connect to any seed ({attempted} attempts): {details}")]
+    SeedsExhausted {
+        /// Number of seed addresses tried.
+        attempted: usize,
+        /// Human-readable per-seed failure summary.
+        details: String,
+    },
+
     /// An internal task failed to join.
     #[error("task join failed")]
     TaskJoinFailed,

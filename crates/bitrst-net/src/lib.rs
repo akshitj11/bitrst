@@ -36,6 +36,6 @@ pub use error::NetError;
 pub use handshake::{ConnectionDirection, HandshakeConfig, HandshakePhase, HandshakeState};
 pub use message::{InvType, InventoryVector, Message, MessagePayload, VersionMessage};
 pub use peer::{spawn_peer, PeerCommand, PeerContext, PeerEvent};
-pub use peers::{PeerManager, PeerManagerConfig};
+pub use peers::{PeerManager, PeerManagerConfig, SeedConnectReport};
 pub use relay::{handle_peer_message, BlockRequestTracker, RelayAction};
 pub use seeds::SeedStrategy;
