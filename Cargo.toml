@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[lib]
+path = "src/lib.rs"
+
 [workspace]
 members = [
     "crates/bitrst-core",
@@ -15,14 +18,19 @@ members = [
 ]
 
 [features]
-test-short-period = ["bitrst-core/test-short-period"]
+test-short-period = ["bitrst-core/test-short-period", "bitrst-net/test-short-period"]
 
 [dependencies]
 bitrst-core = { path = "crates/bitrst-core" }
 bitrst-miner = { path = "crates/bitrst-miner" }
+bitrst-net = { path = "crates/bitrst-net" }
+bitrst-wallet = { path = "crates/bitrst-wallet" }
+bitrst-crypto = { path = "crates/bitrst-crypto" }
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 
 [dev-dependencies]
 bitrst-script = { path = "crates/bitrst-script" }
-bitrst-wallet = { path = "crates/bitrst-wallet" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "test-util"] }
