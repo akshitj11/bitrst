@@ -218,9 +218,7 @@ pub(crate) fn write_compact_size(value: u64, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::{Transaction, TxInput, TxOutput};
-    use crate::limits::{
-        MAX_TRANSACTION_INPUTS, MAX_TRANSACTION_OUTPUTS, MAX_TRANSACTION_SERIALIZED_SIZE,
-    };
+    use crate::limits::{MAX_TRANSACTION_OUTPUTS, MAX_TRANSACTION_SERIALIZED_SIZE};
     use crate::wire::DecodeError;
 
     #[test]
@@ -359,6 +357,5 @@ mod tests {
                 ..
             })
         ));
-        assert_ne!(MAX_TRANSACTION_INPUTS, 0);
     }
 }

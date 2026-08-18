@@ -19,6 +19,9 @@ Every crate that handles **bytes from outside** the process (peers, CLI, disk) m
 | Limit | Value | Notes |
 |-------|-------|--------|
 | Max block serialized size | 4_000_000 bytes | Bitcoin `MAX_BLOCK_SERIALIZED_SIZE` |
+| Max transaction serialized size | 4_000_000 bytes | Defensive standalone decode ceiling; a transaction cannot exceed its containing block |
+| Max inputs per transaction | 25_000 | Defensive decode/allocation limit, not a consensus rule |
+| Max outputs per transaction | 25_000 | Defensive decode/allocation limit, not a consensus rule |
 | Max orphan pool | 100 blocks | Evict oldest when full |
 | Max transactions per block | 25_000 | Protocol upper bound |
 | Max script size | 10_000 bytes | Per-script push (simplified) |
