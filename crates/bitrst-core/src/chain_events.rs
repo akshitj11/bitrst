@@ -1,5 +1,14 @@
 //! Observability events emitted during chain updates.
 
+/// Non-destructive read position into the chain event log.
+///
+/// Cursors survive [`crate::Chain::take_events`] by resetting to new events only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChainEventCursor {
+    pub(crate) index: usize,
+    pub(crate) generation: u64,
+}
+
 /// Reason an orphan block was removed from the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictionReason {

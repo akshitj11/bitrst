@@ -37,7 +37,7 @@ pub mod wire;
 
 pub use block::{Block, BlockHeader};
 pub use chain::{block_work, Chain, ChainError, ChainWork, ConnectResult};
-pub use chain_events::{ChainEvent, EvictionReason};
+pub use chain_events::{ChainEvent, ChainEventCursor, EvictionReason};
 pub use chain_handle::ChainHandle;
 pub use mempool::{AcceptedTx, Mempool, MempoolError, MempoolLimits};
 pub use mempool_handle::{MempoolHandle, MempoolHandleError};

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::block::Block;
-use crate::chain_events::{ChainEvent, EvictionReason};
+use crate::chain_events::{ChainEvent, ChainEventCursor, EvictionReason};
 use crate::difficulty::{
     adjust_bits, difficulty_adjustment_interval, DifficultyError, MAX_COMPACT_BITS,
 };
@@ -220,6 +220,7 @@ pub struct Chain {
     network_time: u32,
     store: MemoryBlockStore,
     events: Vec<ChainEvent>,
+    event_generation: u64,
 }
 
 impl Chain {
@@ -240,6 +241,7 @@ impl Chain {
             network_time,
             store: MemoryBlockStore::new(),
             events: Vec::new(),
+            event_generation: 0,
         };
 
         let hash = genesis.hash();
@@ -313,8 +315,29 @@ impl Chain {
         Ok(())
     }
 
+    /// Returns a cursor positioned at the end of the current event log.
+    pub fn event_cursor(&self) -> ChainEventCursor {
+        ChainEventCursor {
+            index: self.events.len(),
+            generation: self.event_generation,
+        }
+    }
+
+    /// Returns events appended since `cursor` and advances the cursor.
+    pub fn collect_events(&mut self, cursor: &mut ChainEventCursor) -> Vec<ChainEvent> {
+        if cursor.generation != self.event_generation {
+            cursor.index = 0;
+            cursor.generation = self.event_generation;
+        }
+        let start = cursor.index.min(self.events.len());
+        let collected = self.events[start..].to_vec();
+        cursor.index = self.events.len();
+        collected
+    }
+
     /// Returns and clears pending chain events.
     pub fn take_events(&mut self) -> Vec<ChainEvent> {
+        self.event_generation = self.event_generation.wrapping_add(1);
         std::mem::take(&mut self.events)
     }
 

@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::block::Block;
 use crate::chain::{Chain, ChainError, ConnectResult};
-use crate::chain_events::ChainEvent;
+use crate::chain_events::{ChainEvent, ChainEventCursor};
 
 /// Shared handle to a [`Chain`] for concurrent readers and exclusive writers.
 #[derive(Debug, Clone)]
@@ -49,6 +49,19 @@ impl ChainHandle {
         self.write()?.set_network_time(network_time)
     }
 
+    /// Returns a cursor positioned at the end of the current event log.
+    pub fn event_cursor(&self) -> Result<ChainEventCursor, ChainError> {
+        Ok(self.read()?.event_cursor())
+    }
+
+    /// Returns events appended since `cursor` and advances the cursor.
+    pub fn collect_events(
+        &self,
+        cursor: &mut ChainEventCursor,
+    ) -> Result<Vec<ChainEvent>, ChainError> {
+        Ok(self.write()?.collect_events(cursor))
+    }
+
     /// Returns and clears pending chain events.
     ///
     /// # Errors
@@ -86,7 +99,8 @@ impl ChainHandle {
 #[cfg(test)]
 mod tests {
     use super::ChainHandle;
-    use crate::{Block, BlockHeader, Target};
+    use crate::chain_events::ChainEventCursor;
+    use crate::{Block, BlockHeader, ChainEvent, Target};
 
     const TEST_BITS: u32 = 0x1f00_ffff;
     const NETWORK_TIME: u32 = 1_231_006_505;
@@ -112,6 +126,50 @@ mod tests {
             handle.get_block(&hash).expect("get").expect("some").hash(),
             hash
         );
+    }
+
+    #[test]
+    fn collect_events_is_non_destructive_and_survives_take_events() {
+        let genesis = genesis_block();
+        let handle = ChainHandle::new_genesis(genesis.clone(), NETWORK_TIME).expect("genesis");
+        let mut cursor = ChainEventCursor::default();
+
+        let collected = handle.collect_events(&mut cursor).expect("collect genesis");
+        assert_eq!(collected.len(), 1);
+        assert!(handle
+            .collect_events(&mut cursor)
+            .expect("again")
+            .is_empty());
+        assert_eq!(handle.take_events().expect("wallet").len(), 1);
+
+        handle
+            .connect_block(child_block(&genesis))
+            .expect("connect");
+
+        let collected = handle.collect_events(&mut cursor).expect("collect connect");
+        assert_eq!(collected.len(), 1);
+        assert!(matches!(
+            collected[0],
+            ChainEvent::BlockConnected { height: 1, .. }
+        ));
+    }
+
+    fn child_block(parent: &Block) -> Block {
+        let header = BlockHeader {
+            version: 1,
+            prev_blockhash: parent.hash(),
+            merkle_root: [0u8; 32],
+            time: NETWORK_TIME + 600,
+            bits: TEST_BITS,
+            nonce: 0,
+        };
+        let mut block = Block::coinbase(header, 1, 50_0000_0000);
+        block.header.merkle_root = block.merkle_root().expect("merkle");
+        let target = Target::from_bits(TEST_BITS).expect("test bits");
+        while !target.meets(&block.header.hash()) {
+            block.header.nonce = block.header.nonce.wrapping_add(1);
+        }
+        block
     }
 
     fn genesis_block() -> Block {
