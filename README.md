@@ -5,11 +5,13 @@
 
 Bitcoin from scratch, in Rust.
 
+Local mining, P2PKH wallet, bounded mempool, and a P2P `node` that relays blocks and txs. CLI chains stay in memory. `FileBlockStore` is the disk API for library callers.
+
 ## Demo
 
-![bitrst mine demo](docs/assets/mine-demo.gif)
+![bitrst mine finding two local blocks](docs/assets/mine-demo.gif)
 
-Captured from `bitrst mine --count 2 --network-time 1231007105`. Regenerate with `scripts/render-demo.sh` (requires ImageMagick and a built `bitrst` binary).
+`bitrst mine --count 2 --network-time 1231007105`. Network time has to sit strictly above genesis MTP or the first mined block is rejected. Regenerate with `scripts/render-demo.sh` (ImageMagick plus a built `bitrst` binary).
 
 ## Architecture
 
@@ -106,7 +108,7 @@ Diagram source: [`docs/architecture-diagram.mmd`](docs/architecture-diagram.mmd)
 
 ## CLI
 
-The `bitrst` binary exposes ephemeral (in-memory) commands:
+The `bitrst` binary builds a fresh in-memory chain per process:
 
 | Command | Purpose |
 |---------|---------|
@@ -117,7 +119,7 @@ The `bitrst` binary exposes ephemeral (in-memory) commands:
 | `wallet balance` | Report balance for an address on a genesis-only chain |
 | `node` | Run a P2P node via `PeerManager` with shared mempool (Ctrl-C / SIGTERM shutdown) |
 
-CLI chain and wallet state is in-memory only. Commands print an explicit notice. `FileBlockStore` provides atomic on-disk block persistence for library callers; the CLI does not use it yet.
+Each command prints that the chain is ephemeral. `FileBlockStore` writes one hex file per block hash (temp, fsync, rename). The CLI does not call it yet.
 
 ```bash
 bitrst tip

@@ -1,12 +1,6 @@
 # Benchmarks
 
-Criterion benchmarks live in the workspace root crate (`bitrst`) and measure hot paths for legacy consensus code. Results are **machine-dependent**; record your own numbers in the template below instead of treating any checked-in figures as targets.
-
-## Prerequisites
-
-- Release profile (Criterion default for `cargo bench`)
-- Quiet CPU governor recommended for repeatable runs
-- Close other heavy workloads
+Criterion measures SHA-256d and bounded nonce search on this machine only. Numbers from another host are not a target. Record your own run in the template below.
 
 ## Commands
 

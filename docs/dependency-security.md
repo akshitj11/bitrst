@@ -1,16 +1,8 @@
-# bitrst — CI Dependency Security Guide
+# bitrst CI dependency security
 
-This document covers the setup for `cargo audit`, `cargo deny`, and `cargo outdated` in CI. It explains what each tool does, what to configure, and how to handle failures — specific to a Bitcoin node codebase where a bad dependency is a consensus risk, not just a bug.
+A bad hash crate accepts invalid blocks. A bad crypto crate forges signatures. Treat a new dependency like a new consensus rule: justify it, pin it, audit it.
 
-## Why this matters more for bitrst than a normal Rust project
-
-A compromised or vulnerable dependency in a web API means data leaks. In a Bitcoin node it means:
-
-- A broken `sha2` or hash crate → invalid blocks accepted, valid blocks rejected
-- A vulnerable crypto primitive → private keys or signatures forged
-- A supply-chain attack on any consensus-critical crate → network split
-
-**Rule:** every dependency is a consensus surface. Treat new dependencies like new consensus rules — with suspicion and explicit justification.
+`cargo audit` and `cargo deny` hard-fail in CI. `cargo outdated` is weekly and warning-only, because stale is not the same as vulnerable.
 
 ## Repository layout
 
@@ -29,7 +21,7 @@ bitrst/
 | Tool | Checks against | Blocks CI? | When |
 |------|----------------|------------|------|
 | `cargo audit` | RustSec CVE database | Yes | Every push to `main`; every PR |
-| `cargo deny` | Licenses, duplicates, banned crates, sources | Yes (except advisories matrix leg — warn only) | Same as audit |
+| `cargo deny` | Licenses, duplicates, banned crates, sources | Yes (advisories leg warns only) | Same as audit |
 | `cargo outdated` | Latest versions on crates.io | No | Weekly (Mon 09:00 UTC) + manual dispatch |
 
 **Why `cargo outdated` is warning-only:** outdated ≠ vulnerable. Blocking CI on every new upstream release creates churn. The weekly workflow uses `--exit-code 0`.
@@ -43,8 +35,8 @@ bitrst/
 
 Jobs:
 
-1. **`audit`** — `rustsec/audit-check@v2` (hard fail).
-2. **`deny`** — matrix over `advisories`, `bans`, `licenses`, `sources`. The `advisories` leg uses `continue-on-error: true` so a newly published advisory does not block unrelated work; `cargo audit` still hard-fails on CVEs.
+1. **`audit`**: `rustsec/audit-check@v2` (hard fail).
+2. **`deny`**: matrix over `advisories`, `bans`, `licenses`, `sources`. The `advisories` leg uses `continue-on-error: true` so a newly published advisory does not block unrelated work. `cargo audit` still hard-fails on CVEs.
 
 ### `outdated.yml`
 
@@ -89,7 +81,7 @@ With [`.cargo/config.toml`](../.cargo/config.toml), `cargo test` matches CI test
 2. If the vulnerable path is reachable from bitrst: update the dependency immediately.
 3. If unreachable: add to `audit.toml` with a comment; open a tracking issue to update within 30 days.
 
-### `cargo deny` — `bans` (duplicate crate)
+### `cargo deny` bans (duplicate crate)
 
 ```bash
 cargo tree -d -p <crate-name>
@@ -98,7 +90,7 @@ cargo update -p <crate-name>
 
 If unresolvable, add a documented `skip` in `deny.toml`.
 
-### `cargo deny` — `licenses`
+### `cargo deny` licenses
 
 - Permissive license missing from allow list → add after review.
 - GPL or unknown → find an alternative; do not add GPL to bitrst.

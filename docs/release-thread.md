@@ -4,23 +4,23 @@ Post as a thread. Each block is one tweet.
 
 ---
 
-M7 and M8 are in. bitrst now has a working P2P stack, mainnet genesis replay, bounded mempool admission, and atomic disk block storage. CLI chains are still ephemeral; the store trait is real.
+bitrst can now talk to peers, replay mainnet genesis, admit txs into a bounded mempool, and write blocks to disk. The CLI still keeps the chain in RAM. Persistence is a library API, not a node flag.
 
 ---
 
-`PeerManager` shares one `ChainHandle` and one `MempoolHandle` across peers. Relay handles `inv`, `getdata`, `tx`, and `block`. Block and tx request trackers cap outstanding `getdata` with TTL expiry so loops do not accumulate.
+Every peer shares one `ChainHandle` and one `MempoolHandle`. Relay answers `inv`, `getdata`, `tx`, and `block`. Outstanding `getdata` is capped and TTL-expired, so a looping peer cannot queue unbounded fetches.
 
 ---
 
-Mempool admits against active UTXO plus in-pool spends. At capacity it evicts lowest fee rate first. Reorgs drop confirmed txs. Disconnected blocks go into a bounded journal so a heavier fork can put valid spends back without guessing.
+Mempool admission checks the active UTXO set plus in-pool spends. At 5,000 txs or 300 MB it evicts lowest fee rate first, oldest admission as the tie break. A reorg that disconnects a block puts those spends back only if they still validate. The disconnect journal is 256 blocks. Older than that and resync returns an error instead of guessing.
 
 ---
 
-`FileBlockStore` writes one hex file per block hash. Temp file in the same directory, fsync, rename. Open sweeps `.tmp` residue and invalid filenames. Library API only for now.
+`FileBlockStore` names each block by its 64-char hash. Write a `.tmp` in the same directory, fsync, rename. Open deletes leftover temps and junk filenames. The CLI does not use it yet.
 
 ---
 
-Failure modes that actually bit us: event cursor lag desyncing mempool until explicit resync, disconnect journal overrun when recovery needs blocks outside the window, serving mempool txs without revalidation after reorg, MTP validation rejecting `mine` when network time equals genesis time.
+The bugs that actually showed up: a lagging event cursor left mempool stale until explicit resync. Serving a mempool tx after reorg without rechecking it. Mining with `--network-time` equal to genesis time, which MTP rejects because the next block must be strictly later.
 
 ---
 

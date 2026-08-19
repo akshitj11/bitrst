@@ -1,35 +1,29 @@
 # Consensus and production standards (bitrst)
 
-Every crate that handles **bytes from outside** the process (peers, CLI, disk) must follow these rules.
+Bytes from peers, CLI, or disk are untrusted. Public APIs return `Result`. Consensus math matches Bitcoin Core or a cited BIP. Comments say why the rule exists.
 
-## Correctness
+`unwrap` / `expect` stay in tests and in paths where a prior check already made failure impossible. Reorg, orphan, and fork walks must not panic on malformed metadata.
 
-- Implement consensus formulas exactly as in Bitcoin Core or the relevant BIP.
-- Cite the authoritative source in comments for non-obvious math (e.g. `GetBlockProof` in `chain.cpp`).
-- Cross-check with known test vectors before claiming mainnet compatibility.
-
-## Errors, not panics
-
-- Public APIs return `Result` for invalid external input.
-- `expect` / `unwrap` are allowed in tests and for internal invariants that cannot fail if earlier validation succeeded.
-- Reorg, orphan, and fork-walking paths must not panic on malformed metadata.
-
-## Bounded work (DoS resistance)
+## Bounded work
 
 | Limit | Value | Notes |
 |-------|-------|--------|
 | Max block serialized size | 4_000_000 bytes | Bitcoin `MAX_BLOCK_SERIALIZED_SIZE` |
-| Max transaction serialized size | 4_000_000 bytes | Defensive standalone decode ceiling; a transaction cannot exceed its containing block |
-| Max inputs per transaction | 25_000 | Defensive decode/allocation limit, not a consensus rule |
-| Max outputs per transaction | 25_000 | Defensive decode/allocation limit, not a consensus rule |
-| Max orphan pool | 100 blocks | Evict oldest when full |
+| Max transaction serialized size | 4_000_000 bytes | Same ceiling as a containing block |
+| Max inputs per transaction | 25_000 | Decode/allocation bound, not a consensus rule |
+| Max outputs per transaction | 25_000 | Decode/allocation bound, not a consensus rule |
+| Max orphan blocks | 256 | Evict oldest when full |
 | Max transactions per block | 25_000 | Protocol upper bound |
 | Max script size | 10_000 bytes | Per-script push (simplified) |
-| Mining nonce search | 10_000_000 attempts | Returns `MineError::AttemptsExceeded` |
+| Mempool tx count | 5_000 | Default; lowest fee rate evicted first |
+| Mempool serialized bytes | 300_000_000 | Default |
+| Chain event journal | 256 entries | Multi-consumer replay; overrun is an error |
+| Disconnected block journal | 256 blocks | Must cover the event journal window |
+| Mining nonce search | 10_000_000 attempts | `MineError::AttemptsExceeded` |
 
 ## Validation order
 
-Cheapest checks first on untrusted blocks:
+Cheapest checks first:
 
 1. Serialized size
 2. Proof of work
@@ -38,15 +32,8 @@ Cheapest checks first on untrusted blocks:
 5. Timestamp (MTP + future drift)
 6. Compact `bits`
 7. UTXO / transaction rules
-8. Script (M5+)
+8. Script (P2PKH, legacy `SIGHASH_ALL`)
 
 ## Testing
 
-- Unit tests per module with happy path + negative cases.
-- Integration tests under `tests/` for chain reorg, orphans, UTXO undo symmetry.
-- Property tests optional (`proptest`) for invariants.
-- Mainnet block replay and legacy known vectors (M8).
-
-## Documentation
-
-Consensus comments explain **why** (rule purpose, BIP reference), not only what the code does.
+Module tests cover happy path and rejection. Integration tests under `tests/` cover reorg, orphans, UTXO undo, mempool restore, and P2P relay. Mainnet genesis replay and legacy known vectors are M8.
