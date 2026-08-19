@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::chain::Chain;
 use crate::chain_events::ChainEvent;
-use crate::mempool::{AcceptedTx, Mempool, MempoolError, MempoolLimits};
+use crate::mempool::{AcceptedTx, Mempool, MempoolError, MempoolLimits, MempoolResyncError};
 use crate::transaction::Transaction;
 use crate::utxo::UtxoSet;
 
@@ -18,6 +18,10 @@ pub enum MempoolHandleError {
     /// Admission failed validation or policy checks.
     #[error(transparent)]
     Admission(#[from] MempoolError),
+
+    /// Mempool resync could not exactly recover missed disconnect history.
+    #[error(transparent)]
+    Resync(#[from] MempoolResyncError),
 }
 
 /// Shared handle to a [`Mempool`] for concurrent readers and exclusive writers.
@@ -96,9 +100,23 @@ impl MempoolHandle {
     }
 
     /// Reconciles the pool with the active chain when event replay is unavailable.
-    pub fn resync_to_active_chain(&self, chain: &Chain) -> Result<(), MempoolHandleError> {
-        self.write()?.resync_to_active_chain(chain);
-        Ok(())
+    pub fn resync_to_active_chain(
+        &self,
+        chain: &Chain,
+        since_event_seq: u64,
+    ) -> Result<(), MempoolHandleError> {
+        self.write()?
+            .resync_to_active_chain(chain, since_event_seq)
+            .map_err(MempoolHandleError::from)
+    }
+
+    /// Returns a validated mempool transaction for relay, removing stale entries.
+    pub fn serve_transaction(
+        &self,
+        txid: &[u8; 32],
+        chain_utxo: &UtxoSet,
+    ) -> Result<Option<Transaction>, MempoolHandleError> {
+        Ok(self.write()?.serve_transaction(txid, chain_utxo))
     }
 
     fn read(&self) -> Result<RwLockReadGuard<'_, Mempool>, MempoolHandleError> {

@@ -117,6 +117,14 @@ pub enum MempoolError {
     AtCapacity,
 }
 
+/// Errors when mempool resync cannot exactly recover missed disconnect history.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum MempoolResyncError {
+    /// Disconnected-block recovery fell behind the retained journal window.
+    #[error(transparent)]
+    Recovery(#[from] crate::disconnected_block_journal::DisconnectedBlockRecoveryError),
+}
+
 #[derive(Debug, Clone)]
 struct MempoolEntry {
     tx: Transaction,
@@ -268,13 +276,49 @@ impl Mempool {
     }
 
     /// Reconciles the pool with the active chain when incremental event replay is unavailable.
-    pub fn resync_to_active_chain(&mut self, chain: &Chain) {
+    ///
+    /// Uses the bounded disconnected-block journal to restore non-coinbase transactions
+    /// from active-chain blocks disconnected since `since_event_seq`. Returns an error
+    /// when that history has been evicted from the journal.
+    pub fn resync_to_active_chain(
+        &mut self,
+        chain: &Chain,
+        since_event_seq: u64,
+    ) -> Result<(), MempoolResyncError> {
+        let disconnected = chain.recovery_disconnected_blocks(since_event_seq)?;
+
         for height in 0..=chain.height() {
             if let Some(block) = chain.active_block_at(height) {
                 self.remove_for_block(block);
             }
         }
+
         self.revalidate_pool(chain.utxo());
+
+        let mut restore_candidates = Vec::new();
+        for block in disconnected {
+            for tx in block.transactions.iter().skip(1) {
+                if !UtxoSet::is_coinbase(tx) {
+                    restore_candidates.push(tx.clone());
+                }
+            }
+        }
+        self.restore_candidates(restore_candidates, chain.utxo());
+        Ok(())
+    }
+
+    /// Returns a mempool transaction for relay when it still validates; removes stale entries.
+    pub fn serve_transaction(
+        &mut self,
+        txid: &[u8; 32],
+        chain_utxo: &UtxoSet,
+    ) -> Option<Transaction> {
+        let tx = self.get_transaction(txid)?;
+        if self.is_valid_tx(&tx, chain_utxo) {
+            return Some(tx);
+        }
+        self.remove_entry(txid);
+        None
     }
 
     ///
@@ -1005,7 +1049,7 @@ mod tests {
 
         let events = {
             chain.connect_block(block).expect("connect");
-            chain.take_events()
+            chain.take_events().expect("events")
         };
         pool.apply_chain_events(&events, &chain);
         assert!(!pool.contains(&spend_txid));
@@ -1059,7 +1103,7 @@ mod tests {
             .expect("confirm spend");
 
         assert!(pool.contains(&spend_txid));
-        pool.resync_to_active_chain(&chain);
+        pool.resync_to_active_chain(&chain, 0).expect("resync");
         assert!(!pool.contains(&spend_txid));
     }
 
@@ -1094,11 +1138,11 @@ mod tests {
         let alt_b2 = mine_block_on(&fund_parent, NETWORK_TIME + 500, 2);
         let alt_b3 = mine_block_on(&alt_b2, NETWORK_TIME + 600, 3);
         chain.connect_block(alt_b2).expect("alt b2");
-        chain.take_events();
+        chain.take_events().expect("events");
         let result = chain.connect_block(alt_b3).expect("reorg");
         assert!(matches!(result, ConnectResult::Reorganized { .. }));
 
-        pool.apply_chain_events(&chain.take_events(), &chain);
+        pool.apply_chain_events(&chain.take_events().expect("events"), &chain);
 
         assert!(
             pool.contains(&spend_txid),
@@ -1137,10 +1181,10 @@ mod tests {
         let alt_b2 = mine_block_on(&fund_parent, NETWORK_TIME + 500, 2);
         let alt_b3 = mine_block_on(&alt_b2, NETWORK_TIME + 600, 3);
         chain.connect_block(alt_b2).expect("alt b2");
-        chain.take_events();
+        chain.take_events().expect("events");
         chain.connect_block(alt_b3).expect("reorg");
 
-        pool.apply_chain_events(&chain.take_events(), &chain);
+        pool.apply_chain_events(&chain.take_events().expect("events"), &chain);
 
         let mut invalid = spend.clone();
         invalid.inputs[0].script_sig = vec![0x01];
@@ -1151,5 +1195,72 @@ mod tests {
             assert!(pool.is_valid_tx(&tx, chain.utxo()));
         }
         assert!(pool.contains(&spend_txid));
+    }
+
+    #[test]
+    fn resync_after_cursor_lag_restores_disconnected_valid_tx() {
+        let (mut chain, lock_script, funding_txid) = funded_chain_with_p2pkh();
+        let fund_parent = chain.active_block_at(1).expect("fund block").clone();
+
+        let spend = sign_p2pkh_spend(funding_txid, 0, &lock_script, 25_0000_0000, 1_0000_0000);
+        let spend_txid = spend.txid();
+
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.accept_tx(spend.clone(), chain.utxo()).expect("accept");
+
+        let mut block_with_spend = mine_block_on(&fund_parent, NETWORK_TIME + 300, 2);
+        block_with_spend.transactions.push(spend.clone());
+        block_with_spend.header.merkle_root = block_with_spend.merkle_root().expect("merkle");
+        let target = Target::from_bits(TEST_BITS).expect("bits");
+        while !target.meets(&block_with_spend.header.hash()) {
+            block_with_spend.header.nonce = block_with_spend.header.nonce.wrapping_add(1);
+        }
+        chain
+            .connect_block(block_with_spend)
+            .expect("confirm spend");
+        pool.synchronize_to_chain(
+            chain.utxo(),
+            &[chain.active_block_at(2).expect("b2").clone()],
+            &[],
+        );
+        assert!(!pool.contains(&spend_txid));
+
+        let since_seq = chain.event_cursor().last_seq;
+        let alt_b2 = mine_block_on(&fund_parent, NETWORK_TIME + 500, 2);
+        let alt_b3 = mine_block_on(&alt_b2, NETWORK_TIME + 600, 3);
+        chain.connect_block(alt_b2).expect("alt b2");
+        chain.take_events().expect("events");
+        chain.connect_block(alt_b3).expect("reorg");
+
+        pool.resync_to_active_chain(&chain, since_seq)
+            .expect("resync");
+        assert!(pool.contains(&spend_txid));
+        assert!(pool.is_valid_tx(&spend, chain.utxo()));
+    }
+
+    #[test]
+    fn serve_transaction_drops_stale_entries() {
+        let (mut chain, lock_script, funding_txid) = funded_chain_with_p2pkh();
+        let fund_parent = chain.active_block_at(1).expect("fund block").clone();
+
+        let spend = sign_p2pkh_spend(funding_txid, 0, &lock_script, 25_0000_0000, 1_0000_0000);
+        let spend_txid = spend.txid();
+
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.accept_tx(spend.clone(), chain.utxo()).expect("accept");
+
+        let mut block_with_spend = mine_block_on(&fund_parent, NETWORK_TIME + 300, 2);
+        block_with_spend.transactions.push(spend);
+        block_with_spend.header.merkle_root = block_with_spend.merkle_root().expect("merkle");
+        let target = Target::from_bits(TEST_BITS).expect("bits");
+        while !target.meets(&block_with_spend.header.hash()) {
+            block_with_spend.header.nonce = block_with_spend.header.nonce.wrapping_add(1);
+        }
+        chain
+            .connect_block(block_with_spend)
+            .expect("confirm spend");
+
+        assert!(pool.serve_transaction(&spend_txid, chain.utxo()).is_none());
+        assert!(!pool.contains(&spend_txid));
     }
 }
