@@ -16,13 +16,13 @@ fn events_are_correct_after_reorg() {
     let b3 = mine_block_on(&b2, NETWORK_TIME + 5200, 3);
 
     chain.connect_block(b1).expect("side fork b1");
-    chain.take_events();
+    chain.take_events().expect("events");
 
     chain.connect_block(b2).expect("side fork b2");
     let result = chain.connect_block(b3).expect("reorg to fork");
     assert!(matches!(result, ConnectResult::Reorganized { .. }));
 
-    let events = chain.take_events();
+    let events = chain.take_events().expect("events");
     let disconnected = events
         .iter()
         .filter(|event| matches!(event, ChainEvent::BlockDisconnected { .. }))
@@ -44,7 +44,7 @@ fn events_are_correct_after_reorg() {
 #[test]
 fn no_events_emitted_for_side_chain_block() {
     let mut chain = setup_chain_of_length(2);
-    chain.take_events();
+    chain.take_events().expect("events");
 
     let genesis = chain.active_block_at(0).expect("genesis").clone();
     let side_time = NETWORK_TIME + 700;
@@ -56,7 +56,7 @@ fn no_events_emitted_for_side_chain_block() {
     let result = chain.connect_block(side_block).expect("side chain block");
     assert!(matches!(result, ConnectResult::SideChain { .. }));
 
-    let events = chain.take_events();
+    let events = chain.take_events().expect("events");
     assert!(
         !events
             .iter()
@@ -77,7 +77,7 @@ fn cursor_replays_events_after_wallet_take() {
     let genesis = chain.active_block_at(0).expect("genesis").clone();
     let mut cursor = ChainEventCursor::default();
 
-    let wallet = chain.take_events();
+    let wallet = chain.take_events().expect("events");
     assert_eq!(wallet.len(), 1);
 
     let collected = chain.collect_events(&mut cursor).expect("collect");
@@ -106,7 +106,7 @@ fn cursor_collects_reorg_disconnect_and_connect_events() {
     let b3 = mine_block_on(&b2, NETWORK_TIME + 5200, 3);
 
     chain.connect_block(b1).expect("side fork b1");
-    chain.take_events();
+    chain.take_events().expect("events");
     chain.connect_block(b2).expect("side fork b2");
     let result = chain.connect_block(b3).expect("reorg");
     assert!(matches!(result, ConnectResult::Reorganized { .. }));

@@ -39,3 +39,9 @@ pub const DEFAULT_MAX_MEMPOOL_BYTES: usize = 300_000_000;
 
 /// Default retained chain-event journal entries for multi-consumer replay.
 pub const DEFAULT_CHAIN_EVENT_JOURNAL_CAPACITY: usize = 256;
+
+/// Default retained disconnected active-chain blocks for mempool lag recovery.
+///
+/// Must be at least [`DEFAULT_CHAIN_EVENT_JOURNAL_CAPACITY`] so every disconnect event
+/// that remains in the event journal still has its block available for recovery.
+pub const DEFAULT_DISCONNECTED_BLOCK_JOURNAL_CAPACITY: usize = DEFAULT_CHAIN_EVENT_JOURNAL_CAPACITY;

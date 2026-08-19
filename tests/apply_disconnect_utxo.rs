@@ -54,6 +54,6 @@ fn apply_then_disconnect_restores_utxo_count() {
     chain.connect_block(block_one).expect("connect");
     assert_eq!(chain.utxo().len(), 2);
 
-    let events = chain.take_events();
+    let events = chain.take_events().expect("events");
     assert!(!events.is_empty());
 }

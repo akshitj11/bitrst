@@ -15,6 +15,7 @@ use crate::chain_events::{ChainEvent, ChainEventCursor, ChainEventCursorError, E
 use crate::difficulty::{
     adjust_bits, difficulty_adjustment_interval, DifficultyError, MAX_COMPACT_BITS,
 };
+use crate::disconnected_block_journal::{DisconnectedBlockJournal, DisconnectedBlockRecoveryError};
 use crate::limits::{
     MAX_BLOCK_SERIALIZED_SIZE, MAX_ORPHAN_BLOCKS, MAX_SCRIPT_SIZE, MAX_TRANSACTIONS_PER_BLOCK,
 };
@@ -196,6 +197,10 @@ pub enum ChainError {
     /// A chain-event cursor fell behind the retained journal window.
     #[error(transparent)]
     EventCursor(#[from] ChainEventCursorError),
+
+    /// Disconnected-block recovery fell behind the retained journal window.
+    #[error(transparent)]
+    DisconnectedBlockRecovery(#[from] DisconnectedBlockRecoveryError),
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +230,7 @@ pub struct Chain {
     network_time: u32,
     store: MemoryBlockStore,
     event_journal: ChainEventJournal,
+    disconnected_journal: DisconnectedBlockJournal,
 }
 
 impl Chain {
@@ -245,6 +251,59 @@ impl Chain {
             network_time,
             store: MemoryBlockStore::new(),
             event_journal: ChainEventJournal::default(),
+            disconnected_journal: DisconnectedBlockJournal::default(),
+        };
+
+        let hash = genesis.hash();
+        chain.validate_block_limits(&genesis)?;
+        chain.validate_block_for_parent(&genesis, None, None, 0)?;
+        let undo = chain.apply_block_transactions(&genesis)?;
+        let work = block_work(genesis.header.bits)?;
+
+        chain.store.put_block(&genesis)?;
+        chain.known.insert(
+            hash,
+            BlockMeta {
+                block: genesis.clone(),
+                height: 0,
+                work,
+                undo,
+            },
+        );
+        chain.blocks.push(genesis);
+        chain.active_hashes.insert(hash);
+        chain.total_work = work;
+        chain.event_journal.push(ChainEvent::BlockConnected {
+            height: 0,
+            hash,
+            tx_count: chain.blocks[0].transactions.len(),
+        });
+
+        Ok(chain)
+    }
+
+    /// Creates a chain with explicit journal capacities (primarily for tests).
+    pub fn with_journal_capacities(
+        genesis: Block,
+        network_time: u32,
+        event_capacity: usize,
+    ) -> Result<Self, ChainError> {
+        if network_time == 0 {
+            return Err(ChainError::InvalidNetworkTime);
+        }
+
+        let mut chain = Self {
+            blocks: Vec::new(),
+            active_hashes: HashSet::new(),
+            known: HashMap::new(),
+            total_work: ChainWork::default(),
+            utxo: UtxoSet::new(),
+            orphans: HashMap::new(),
+            orphan_receive_seq: 0,
+            network_time,
+            store: MemoryBlockStore::new(),
+            event_journal: ChainEventJournal::with_capacity(event_capacity),
+            disconnected_journal: DisconnectedBlockJournal::with_capacity(event_capacity),
         };
 
         let hash = genesis.hash();
@@ -331,9 +390,27 @@ impl Chain {
         self.event_journal.collect_events(cursor)
     }
 
-    /// Returns and clears pending chain events for wallet consumers.
-    pub fn take_events(&mut self) -> Vec<ChainEvent> {
+    /// Returns pending chain events for wallet consumers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainEventCursorError`] when the wallet high-water mark has fallen
+    /// behind the retained event journal window.
+    pub fn take_events(&mut self) -> Result<Vec<ChainEvent>, ChainEventCursorError> {
         self.event_journal.take_events()
+    }
+
+    /// Returns disconnected active-chain blocks retained since `since_event_seq`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DisconnectedBlockRecoveryError`] when `since_event_seq` is older than
+    /// the retained disconnected-block journal window.
+    pub fn recovery_disconnected_blocks(
+        &self,
+        since_event_seq: u64,
+    ) -> Result<Vec<Block>, DisconnectedBlockRecoveryError> {
+        self.disconnected_journal.blocks_since(since_event_seq)
     }
 
     /// Returns a reference to the block store.
@@ -615,8 +692,10 @@ impl Chain {
             .and_then(|b| self.known.get(&b.hash()).map(|m| m.work))
             .unwrap_or_default();
 
-        self.event_journal
+        let seq = self
+            .event_journal
             .push(ChainEvent::BlockDisconnected { height, hash });
+        self.disconnected_journal.record(seq, block);
         Ok(())
     }
 

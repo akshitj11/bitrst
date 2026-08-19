@@ -21,7 +21,7 @@ fn wallet_ignores_side_chain_blocks() {
         1,
     );
     chain.connect_block(main_block).expect("main block");
-    chain.take_events();
+    chain.take_events().expect("events");
 
     let side_block = coinbase_paying(
         chain.active_block_at(0).expect("genesis"),
@@ -34,7 +34,7 @@ fn wallet_ignores_side_chain_blocks() {
         .expect("network time");
     let result = chain.connect_block(side_block).expect("side block");
     assert!(matches!(result, ConnectResult::SideChain { .. }));
-    let events = chain.take_events();
+    let events = chain.take_events().expect("events");
 
     wallet.apply_events(&events, &chain).expect("events");
 
@@ -49,7 +49,7 @@ fn wallet_balance_correct_after_reorg() {
     wallet.watch_address(address.clone());
     let genesis = genesis_block();
     let mut chain = Chain::new_genesis(genesis.clone(), NETWORK_TIME).expect("genesis");
-    chain.take_events();
+    chain.take_events().expect("events");
 
     let paying_a1 = coinbase_paying(&genesis, 1, NETWORK_TIME + 600, address.pubkey_hash());
     chain
@@ -57,7 +57,7 @@ fn wallet_balance_correct_after_reorg() {
         .expect("network time");
     chain.connect_block(paying_a1).expect("main block");
     wallet
-        .apply_events(&chain.take_events(), &chain)
+        .apply_events(&chain.take_events().expect("events"), &chain)
         .expect("wallet main");
     assert_eq!(wallet.balance(), REWARD);
 
@@ -67,13 +67,13 @@ fn wallet_balance_correct_after_reorg() {
         .set_network_time(b1.header.time)
         .expect("network time");
     chain.connect_block(b1).expect("side b1");
-    chain.take_events();
+    chain.take_events().expect("events");
     chain
         .set_network_time(b2.header.time)
         .expect("network time");
     let result = chain.connect_block(b2).expect("reorg");
     assert!(matches!(result, ConnectResult::Reorganized { .. }));
-    let events = chain.take_events();
+    let events = chain.take_events().expect("events");
     assert!(events
         .iter()
         .any(|event| matches!(event, ChainEvent::BlockDisconnected { .. })));

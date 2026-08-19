@@ -157,11 +157,11 @@ mod tests {
         let mut wallet = Wallet::new();
         wallet.watch_address(address.clone());
         let mut chain = Chain::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
-        chain.take_events();
+        chain.take_events().expect("events");
 
         let block = block_paying(&chain, 1, address.pubkey_hash(), 25_0000_0000);
         chain.connect_block(block).expect("connect");
-        let events = chain.take_events();
+        let events = chain.take_events().expect("events");
 
         wallet.apply_events(&events, &chain).expect("apply");
 
@@ -195,13 +195,13 @@ mod tests {
         let mut wallet = Wallet::new();
         wallet.watch_address(address.clone());
         let mut chain = Chain::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
-        chain.take_events();
+        chain.take_events().expect("events");
 
         let block = block_paying(&chain, 1, address.pubkey_hash(), 25_0000_0000);
         let block_hash = block.hash();
         chain.connect_block(block).expect("connect");
         wallet
-            .apply_events(&chain.take_events(), &chain)
+            .apply_events(&chain.take_events().expect("events"), &chain)
             .expect("connect event");
         assert_eq!(wallet.balance(), 25_0000_0000);
 

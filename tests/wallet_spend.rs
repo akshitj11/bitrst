@@ -15,7 +15,7 @@ fn wallet_signs_and_spends_received_coinbase_on_local_chain() {
     let mut wallet = Wallet::new();
     wallet.watch_address(address.clone());
     let mut chain = Chain::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
-    chain.take_events();
+    chain.take_events().expect("events");
 
     let funding_block = coinbase_paying(&chain, 1, address.pubkey_hash(), REWARD);
     let funding_txid = funding_block.transactions[0].txid();
@@ -24,7 +24,7 @@ fn wallet_signs_and_spends_received_coinbase_on_local_chain() {
         .expect("network time");
     chain.connect_block(funding_block).expect("funding block");
     wallet
-        .apply_events(&chain.take_events(), &chain)
+        .apply_events(&chain.take_events().expect("events"), &chain)
         .expect("wallet funding events");
     assert_eq!(wallet.balance(), REWARD);
 
@@ -63,7 +63,7 @@ fn wallet_signs_and_spends_received_coinbase_on_local_chain() {
         .expect("network time");
     chain.connect_block(spend_block).expect("spend block");
     wallet
-        .apply_events(&chain.take_events(), &chain)
+        .apply_events(&chain.take_events().expect("events"), &chain)
         .expect("wallet spend events");
 
     assert_eq!(wallet.balance(), change_value);

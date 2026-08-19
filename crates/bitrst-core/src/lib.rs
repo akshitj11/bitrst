@@ -12,6 +12,8 @@ pub mod chain_events;
 pub mod chain_handle;
 /// Difficulty adjustment over 2,016-block periods.
 pub mod difficulty;
+/// Bounded journal of recently disconnected active-chain blocks.
+pub mod disconnected_block_journal;
 /// Protocol size and DoS limits.
 pub mod limits;
 /// In-memory transaction pool.
@@ -41,7 +43,7 @@ pub use block::{Block, BlockHeader};
 pub use chain::{block_work, Chain, ChainError, ChainWork, ConnectResult};
 pub use chain_events::{ChainEvent, ChainEventCursor, ChainEventCursorError, EvictionReason};
 pub use chain_handle::ChainHandle;
-pub use mempool::{AcceptedTx, Mempool, MempoolError, MempoolLimits};
+pub use mempool::{AcceptedTx, Mempool, MempoolError, MempoolLimits, MempoolResyncError};
 pub use mempool_handle::{MempoolHandle, MempoolHandleError};
 pub use merkle::merkle_root;
 pub use pow::Target;

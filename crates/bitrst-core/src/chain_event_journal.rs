@@ -1,4 +1,12 @@
 //! Bounded multi-consumer journal for chain observability events.
+//!
+//! ## Wallet retention
+//!
+//! Wallet consumers drain events via [`ChainEventJournal::take_events`], which tracks a
+//! monotonic high-water sequence. If the wallet falls behind and the journal wraps,
+//! [`take_events`] returns [`ChainEventCursorError`] instead of silently skipping
+//! evicted history. Mempool cursors use [`ChainEventJournal::collect_events`] with the
+//! same lag semantics.
 
 use std::collections::VecDeque;
 
@@ -17,7 +25,8 @@ struct JournalEntry {
 /// Cursor position for non-destructive event collection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChainEventCursor {
-    pub(crate) last_seq: u64,
+    /// Last event sequence successfully collected by this cursor.
+    pub last_seq: u64,
 }
 
 /// Errors when a cursor has fallen behind the retained journal window.
@@ -81,7 +90,21 @@ impl ChainEventJournal {
     }
 
     /// Drains wallet-visible events without removing them from the journal.
-    pub fn take_events(&mut self) -> Vec<ChainEvent> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChainEventCursorError`] when the wallet high-water mark has fallen
+    /// behind the retained journal window.
+    pub fn take_events(&mut self) -> Result<Vec<ChainEvent>, ChainEventCursorError> {
+        if let Some(oldest) = self.oldest_seq() {
+            if self.wallet_high_water < oldest.saturating_sub(1) {
+                return Err(ChainEventCursorError {
+                    cursor_seq: self.wallet_high_water,
+                    oldest_available: oldest,
+                });
+            }
+        }
+
         let events: Vec<_> = self
             .entries
             .iter()
@@ -91,7 +114,7 @@ impl ChainEventJournal {
         if let Some(last) = self.entries.back() {
             self.wallet_high_water = last.seq;
         }
-        events
+        Ok(events)
     }
 
     /// Collects events after `cursor`, advancing the cursor on success.
@@ -149,7 +172,7 @@ mod tests {
         let mut journal = ChainEventJournal::with_capacity(8);
         journal.push(connected(0));
 
-        let wallet = journal.take_events();
+        let wallet = journal.take_events().expect("wallet");
         assert_eq!(wallet.len(), 1);
 
         let mut cursor = ChainEventCursor::default();
@@ -210,10 +233,24 @@ mod tests {
     fn take_events_is_idempotent_until_new_events() {
         let mut journal = ChainEventJournal::with_capacity(4);
         journal.push(connected(1));
-        assert_eq!(journal.take_events().len(), 1);
-        assert!(journal.take_events().is_empty());
+        assert_eq!(journal.take_events().expect("take").len(), 1);
+        assert!(journal.take_events().expect("take").is_empty());
         journal.push(connected(2));
-        assert_eq!(journal.take_events().len(), 1);
+        assert_eq!(journal.take_events().expect("take").len(), 1);
+    }
+
+    #[test]
+    fn wallet_take_returns_lag_when_high_water_falls_behind() {
+        let mut journal = ChainEventJournal::with_capacity(2);
+        journal.push(connected(1));
+        assert_eq!(journal.take_events().expect("first").len(), 1);
+
+        journal.push(connected(2));
+        journal.push(connected(3));
+        journal.push(connected(4));
+        let err = journal.take_events().expect_err("lag");
+        assert_eq!(err.cursor_seq, 1);
+        assert_eq!(err.oldest_available, 3);
     }
 
     #[test]

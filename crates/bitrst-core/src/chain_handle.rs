@@ -62,13 +62,14 @@ impl ChainHandle {
         Ok(self.write()?.collect_events(cursor)?)
     }
 
-    /// Returns and clears pending chain events.
+    /// Returns pending chain events for wallet consumers.
     ///
     /// # Errors
     ///
-    /// Returns [`ChainError::LockPoisoned`] if another thread panicked while holding the lock.
+    /// Returns [`ChainError::EventCursor`] when the wallet high-water mark has fallen
+    /// behind the retained event journal window.
     pub fn take_events(&self) -> Result<Vec<ChainEvent>, ChainError> {
-        Ok(self.write()?.take_events())
+        self.write()?.take_events().map_err(ChainError::from)
     }
 
     /// Returns true when the node already knows `hash`.

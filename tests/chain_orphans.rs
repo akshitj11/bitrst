@@ -2,11 +2,12 @@
 
 mod common;
 
-use bitrst_core::{Chain, ChainError, ChainEvent, ConnectResult, EvictionReason};
+use bitrst_core::limits::MAX_ORPHAN_BLOCKS;
+use bitrst_core::{Chain, ChainError, ChainEvent, ChainEventCursor, ConnectResult, EvictionReason};
 
 use common::{
-    build_linear_chain_blocks, build_orphan_block, fill_orphan_pool, genesis_block,
-    setup_chain_of_length, NETWORK_TIME,
+    build_linear_chain_blocks, build_orphan_block, genesis_block, setup_chain_of_length,
+    NETWORK_TIME,
 };
 
 #[test]
@@ -52,9 +53,25 @@ fn orphan_with_duplicate_parent_is_rejected() {
 #[test]
 fn orphan_pool_evicts_oldest_when_full() {
     let mut chain = setup_chain_of_length(1);
-    let first_hash = fill_orphan_pool(&mut chain);
+    let mut cursor = ChainEventCursor::default();
+    let mut events = chain.collect_events(&mut cursor).expect("genesis events");
 
-    let events = chain.take_events();
+    let first = build_orphan_block(1);
+    let first_hash = first.hash();
+    chain.connect_block(first).expect("first orphan");
+    events.extend(chain.collect_events(&mut cursor).expect("first orphan events"));
+
+    for index in 2..=MAX_ORPHAN_BLOCKS {
+        chain
+            .connect_block(build_orphan_block(index))
+            .expect("fill orphan");
+        events.extend(chain.collect_events(&mut cursor).expect("orphan events"));
+    }
+    chain
+        .connect_block(build_orphan_block(MAX_ORPHAN_BLOCKS + 1))
+        .expect("overflow orphan");
+    events.extend(chain.collect_events(&mut cursor).expect("overflow events"));
+
     let evicted = events.iter().find_map(|event| match event {
         ChainEvent::OrphanEvicted { hash, reason, .. } => {
             (*reason == EvictionReason::PoolFull).then_some(*hash)
