@@ -26,7 +26,10 @@ fn mainnet_genesis_fixture_deserializes_and_roundtrips() {
     let raw = load_mainnet_genesis_fixture();
     let block = Block::deserialize(&raw).expect("mainnet genesis should deserialize");
     let reserialized = block.serialize();
-    assert_eq!(reserialized, raw, "exact wire reserialization must match fixture");
+    assert_eq!(
+        reserialized, raw,
+        "exact wire reserialization must match fixture"
+    );
 
     assert_eq!(
         to_bitcoin_hex(block.hash()),
