@@ -295,6 +295,11 @@ impl Chain {
         &self.utxo
     }
 
+    /// Returns cumulative proof-of-work on the active chain.
+    pub fn total_work(&self) -> ChainWork {
+        self.total_work
+    }
+
     /// Updates network-adjusted time used for future-drift checks.
     ///
     /// # Errors
