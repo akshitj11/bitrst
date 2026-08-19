@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "project": "bitrst",
+  "last_updated": "2026-08-19",
+  "test_command": "cargo test --all --features test-short-period",
+  "stats": {
+    "tests": 267,
+    "lines_of_rust": 12653,
+    "crates": 7
+  },
+  "milestones": [
+    { "id": "M1", "name": "Block + SHA256d", "status": "done" },
+    { "id": "M2", "name": "Transactions + UTXO", "status": "done" },
+    { "id": "M3", "name": "Proof of work", "status": "done" },
+    { "id": "M4", "name": "Chain validation", "status": "done" },
+    { "id": "M4.5", "name": "Workspace hardening", "status": "done" },
+    { "id": "M4.6", "name": "Chain robustness", "status": "done" },
+    { "id": "M5", "name": "Script VM", "status": "done" },
+    { "id": "M6", "name": "Wallet", "status": "done" },
+    { "id": "M7", "name": "P2P networking", "status": "done" },
+    { "id": "M8", "name": "Benchmarks and vectors", "status": "done" },
+    { "id": "M8.1", "name": "FileBlockStore", "status": "done" },
+    { "id": "M8.2", "name": "Mempool + relay", "status": "done" }
+  ],
+  "crates": [
+    { "name": "bitrst-core", "role": "chain, mempool, store" },
+    { "name": "bitrst-crypto", "role": "hashing and ECDSA" },
+    { "name": "bitrst-script", "role": "P2PKH interpreter" },
+    { "name": "bitrst-miner", "role": "nonce search" },
+    { "name": "bitrst-wallet", "role": "keys, addresses, signing" },
+    { "name": "bitrst-net", "role": "P2P handshake and relay" },
+    { "name": "bitrst", "role": "CLI binary" }
+  ],
+  "diagram": {
+    "source": "docs/architecture-diagram.mmd",
+    "sha256": "3613f69065c63601de099ab8792616303be6e3b8a3d3771e7898d38fa7e1e585"
+  }
+}

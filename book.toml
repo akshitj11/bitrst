@@ -1,0 +1,13 @@
+[book]
+title = "bitrst"
+authors = ["akshit"]
+language = "en"
+description = "Bitcoin from scratch in Rust"
+src = "docs"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+git-repository-url = "https://github.com/akshitj11/bitrst"
