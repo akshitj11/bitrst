@@ -38,7 +38,7 @@ pub use chain_handle::ChainHandle;
 pub use merkle::merkle_root;
 pub use pow::Target;
 pub use sighash::{sighash_all, SighashError, SIGHASH_ALL};
-pub use store::{BlockStore, MemoryBlockStore, StoreError};
+pub use store::{BlockStore, FileBlockStore, MemoryBlockStore, StoreError};
 pub use transaction::{Transaction, TxInput, TxOutput};
 pub use utxo::{OutPoint, TxUndo, UtxoEntry, UtxoError, UtxoSet};
 pub use wire::{DecodeError, WireReader};
