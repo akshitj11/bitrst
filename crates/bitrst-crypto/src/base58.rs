@@ -56,6 +56,8 @@ fn checksum(data: &[u8]) -> [u8; 4] {
 mod tests {
     use super::{decode_check, encode_check, Base58Error};
 
+    /// Bitcoin Wiki Base58Check example payload (version `0x00`).
+    /// Reference: <https://en.bitcoin.it/wiki/Base58Check_encoding>
     #[test]
     fn encodes_mainnet_p2pkh_known_payload() {
         let payload = [

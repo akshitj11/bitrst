@@ -1,4 +1,6 @@
 //! Cross-check per-block work against Bitcoin Core's GetBlockProof formula.
+//!
+//! Reference: <https://github.com/bitcoin/bitcoin/blob/master/src/chain.cpp>
 
 use bitrst_core::pow::Target;
 use bitrst_core::uint256;
