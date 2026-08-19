@@ -55,11 +55,18 @@ impl FileBlockStore {
             let entry = entry.map_err(|source| StoreError::io("read store entry", source))?;
             let file_name = entry.file_name();
             let Some(name) = file_name.to_str() else {
+                let _ = fs::remove_file(entry.path());
                 continue;
             };
             if name.ends_with(".tmp") {
                 fs::remove_file(entry.path())
                     .map_err(|source| StoreError::io("remove stale temp block file", source))?;
+                continue;
+            }
+            if !is_valid_block_filename(name) {
+                fs::remove_file(entry.path()).map_err(|source| {
+                    StoreError::io("remove invalid block store residue", source)
+                })?;
             }
         }
         Ok(())
@@ -72,6 +79,10 @@ impl FileBlockStore {
             .map_err(|source| StoreError::io("sync store directory", source))?;
         Ok(())
     }
+}
+
+fn is_valid_block_filename(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 impl BlockStore for FileBlockStore {
@@ -255,5 +266,18 @@ mod tests {
 
         FileBlockStore::new(&path).expect("open cleans temp");
         assert!(!temp.exists());
+    }
+
+    #[test]
+    fn cleans_invalid_residue_filenames_on_open() {
+        let dir = tempdir().expect("tempdir");
+        let path = store_path(&dir);
+        fs::create_dir_all(&path).expect("mkdir");
+        fs::write(path.join("partial"), b"leftover").expect("write");
+        fs::write(path.join("ZZ"), b"short").expect("write short");
+
+        FileBlockStore::new(&path).expect("open cleans residue");
+        assert!(!path.join("partial").exists());
+        assert!(!path.join("ZZ").exists());
     }
 }
