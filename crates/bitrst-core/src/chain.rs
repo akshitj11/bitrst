@@ -10,7 +10,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 
 use crate::block::Block;
-use crate::chain_events::{ChainEvent, ChainEventCursor, EvictionReason};
+use crate::chain_event_journal::ChainEventJournal;
+use crate::chain_events::{ChainEvent, ChainEventCursor, ChainEventCursorError, EvictionReason};
 use crate::difficulty::{
     adjust_bits, difficulty_adjustment_interval, DifficultyError, MAX_COMPACT_BITS,
 };
@@ -184,13 +185,17 @@ pub enum ChainError {
     #[error("network time must be greater than zero")]
     InvalidNetworkTime,
 
-    /// Script verification failed for a transaction input.
+    /// Invalid script verification failed for a transaction input.
     #[error("invalid script")]
     InvalidScript,
 
     /// Sighash computation failed during script verification.
     #[error("sighash error")]
     Sighash(#[from] SighashError),
+
+    /// A chain-event cursor fell behind the retained journal window.
+    #[error(transparent)]
+    EventCursor(#[from] ChainEventCursorError),
 }
 
 #[derive(Debug, Clone)]
@@ -219,8 +224,7 @@ pub struct Chain {
     orphan_receive_seq: u64,
     network_time: u32,
     store: MemoryBlockStore,
-    events: Vec<ChainEvent>,
-    event_generation: u64,
+    event_journal: ChainEventJournal,
 }
 
 impl Chain {
@@ -240,8 +244,7 @@ impl Chain {
             orphan_receive_seq: 0,
             network_time,
             store: MemoryBlockStore::new(),
-            events: Vec::new(),
-            event_generation: 0,
+            event_journal: ChainEventJournal::default(),
         };
 
         let hash = genesis.hash();
@@ -263,7 +266,7 @@ impl Chain {
         chain.blocks.push(genesis);
         chain.active_hashes.insert(hash);
         chain.total_work = work;
-        chain.events.push(ChainEvent::BlockConnected {
+        chain.event_journal.push(ChainEvent::BlockConnected {
             height: 0,
             hash,
             tx_count: chain.blocks[0].transactions.len(),
@@ -317,28 +320,20 @@ impl Chain {
 
     /// Returns a cursor positioned at the end of the current event log.
     pub fn event_cursor(&self) -> ChainEventCursor {
-        ChainEventCursor {
-            index: self.events.len(),
-            generation: self.event_generation,
-        }
+        self.event_journal.event_cursor()
     }
 
     /// Returns events appended since `cursor` and advances the cursor.
-    pub fn collect_events(&mut self, cursor: &mut ChainEventCursor) -> Vec<ChainEvent> {
-        if cursor.generation != self.event_generation {
-            cursor.index = 0;
-            cursor.generation = self.event_generation;
-        }
-        let start = cursor.index.min(self.events.len());
-        let collected = self.events[start..].to_vec();
-        cursor.index = self.events.len();
-        collected
+    pub fn collect_events(
+        &mut self,
+        cursor: &mut ChainEventCursor,
+    ) -> Result<Vec<ChainEvent>, ChainEventCursorError> {
+        self.event_journal.collect_events(cursor)
     }
 
-    /// Returns and clears pending chain events.
+    /// Returns and clears pending chain events for wallet consumers.
     pub fn take_events(&mut self) -> Vec<ChainEvent> {
-        self.event_generation = self.event_generation.wrapping_add(1);
-        std::mem::take(&mut self.events)
+        self.event_journal.take_events()
     }
 
     /// Returns a reference to the block store.
@@ -411,7 +406,7 @@ impl Chain {
             self.blocks.push(block);
             self.active_hashes.insert(hash);
             self.total_work = candidate_work;
-            self.events.push(ChainEvent::BlockConnected {
+            self.event_journal.push(ChainEvent::BlockConnected {
                 height,
                 hash,
                 tx_count: self
@@ -442,7 +437,7 @@ impl Chain {
         let old_tip = tip_hash;
         let depth = self.reorg_to_block(block, candidate_work)?;
         let new_tip = self.tip_hash();
-        self.events.push(ChainEvent::ChainReorg {
+        self.event_journal.push(ChainEvent::ChainReorg {
             depth,
             old_tip,
             new_tip,
@@ -469,7 +464,7 @@ impl Chain {
                 received_at: self.orphan_receive_seq,
             },
         );
-        self.events.push(ChainEvent::OrphanAdded {
+        self.event_journal.push(ChainEvent::OrphanAdded {
             hash,
             pool_size: self.orphans.len(),
         });
@@ -485,7 +480,7 @@ impl Chain {
 
         if let Some(hash) = oldest {
             self.orphans.remove(&hash);
-            self.events.push(ChainEvent::OrphanEvicted {
+            self.event_journal.push(ChainEvent::OrphanEvicted {
                 hash,
                 reason: EvictionReason::PoolFull,
             });
@@ -558,7 +553,7 @@ impl Chain {
             );
             self.blocks.push(block);
             self.active_hashes.insert(hash);
-            self.events.push(ChainEvent::BlockConnected {
+            self.event_journal.push(ChainEvent::BlockConnected {
                 height,
                 hash,
                 tx_count: self
@@ -620,7 +615,7 @@ impl Chain {
             .and_then(|b| self.known.get(&b.hash()).map(|m| m.work))
             .unwrap_or_default();
 
-        self.events
+        self.event_journal
             .push(ChainEvent::BlockDisconnected { height, hash });
         Ok(())
     }

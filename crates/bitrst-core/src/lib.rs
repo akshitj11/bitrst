@@ -4,6 +4,8 @@
 pub mod block;
 /// Block chain validation and fork choice.
 pub mod chain;
+/// Bounded multi-consumer chain event journal.
+pub mod chain_event_journal;
 /// Chain observability events.
 pub mod chain_events;
 /// Thread-safe chain access.
@@ -37,7 +39,7 @@ pub mod wire;
 
 pub use block::{Block, BlockHeader};
 pub use chain::{block_work, Chain, ChainError, ChainWork, ConnectResult};
-pub use chain_events::{ChainEvent, ChainEventCursor, EvictionReason};
+pub use chain_events::{ChainEvent, ChainEventCursor, ChainEventCursorError, EvictionReason};
 pub use chain_handle::ChainHandle;
 pub use mempool::{AcceptedTx, Mempool, MempoolError, MempoolLimits};
 pub use mempool_handle::{MempoolHandle, MempoolHandleError};

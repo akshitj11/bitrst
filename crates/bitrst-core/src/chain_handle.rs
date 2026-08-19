@@ -59,7 +59,7 @@ impl ChainHandle {
         &self,
         cursor: &mut ChainEventCursor,
     ) -> Result<Vec<ChainEvent>, ChainError> {
-        Ok(self.write()?.collect_events(cursor))
+        Ok(self.write()?.collect_events(cursor)?)
     }
 
     /// Returns and clears pending chain events.

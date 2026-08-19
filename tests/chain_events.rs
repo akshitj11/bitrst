@@ -2,7 +2,7 @@
 
 mod common;
 
-use bitrst_core::{ChainEvent, ConnectResult};
+use bitrst_core::{ChainEvent, ChainEventCursor, ConnectResult};
 
 use common::{mine_block_on, setup_chain_of_length, NETWORK_TIME};
 
@@ -69,4 +69,56 @@ fn no_events_emitted_for_side_chain_block() {
             .any(|event| matches!(event, ChainEvent::BlockDisconnected { .. })),
         "side chain must not emit BlockDisconnected"
     );
+}
+
+#[test]
+fn cursor_replays_events_after_wallet_take() {
+    let mut chain = setup_chain_of_length(1);
+    let genesis = chain.active_block_at(0).expect("genesis").clone();
+    let mut cursor = ChainEventCursor::default();
+
+    let wallet = chain.take_events();
+    assert_eq!(wallet.len(), 1);
+
+    let collected = chain.collect_events(&mut cursor).expect("collect");
+    assert_eq!(collected.len(), 1);
+
+    chain
+        .connect_block(mine_block_on(&genesis, NETWORK_TIME + 600, 1))
+        .expect("connect");
+    let collected = chain.collect_events(&mut cursor).expect("collect connect");
+    assert_eq!(collected.len(), 1);
+    assert!(matches!(
+        collected[0],
+        ChainEvent::BlockConnected { height: 1, .. }
+    ));
+}
+
+#[test]
+fn cursor_collects_reorg_disconnect_and_connect_events() {
+    let mut chain = setup_chain_of_length(3);
+    let genesis = chain.active_block_at(0).expect("genesis").clone();
+    let mut cursor = ChainEventCursor::default();
+    let _ = chain.collect_events(&mut cursor).expect("seed cursor");
+
+    let b1 = mine_block_on(&genesis, NETWORK_TIME + 5000, 1);
+    let b2 = mine_block_on(&b1, NETWORK_TIME + 5100, 2);
+    let b3 = mine_block_on(&b2, NETWORK_TIME + 5200, 3);
+
+    chain.connect_block(b1).expect("side fork b1");
+    chain.take_events();
+    chain.connect_block(b2).expect("side fork b2");
+    let result = chain.connect_block(b3).expect("reorg");
+    assert!(matches!(result, ConnectResult::Reorganized { .. }));
+
+    let collected = chain.collect_events(&mut cursor).expect("collect reorg");
+    assert!(collected
+        .iter()
+        .any(|event| matches!(event, ChainEvent::BlockDisconnected { .. })));
+    assert!(collected
+        .iter()
+        .any(|event| matches!(event, ChainEvent::ChainReorg { .. })));
+    assert!(collected
+        .iter()
+        .any(|event| matches!(event, ChainEvent::BlockConnected { .. })));
 }

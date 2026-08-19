@@ -36,3 +36,6 @@ pub const DEFAULT_MAX_MEMPOOL_TX_COUNT: usize = 5_000;
 
 /// Default maximum total serialized bytes held in the mempool.
 pub const DEFAULT_MAX_MEMPOOL_BYTES: usize = 300_000_000;
+
+/// Default retained chain-event journal entries for multi-consumer replay.
+pub const DEFAULT_CHAIN_EVENT_JOURNAL_CAPACITY: usize = 256;
