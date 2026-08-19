@@ -45,7 +45,7 @@ Cheapest checks first on untrusted blocks:
 - Unit tests per module with happy path + negative cases.
 - Integration tests under `tests/` for chain reorg, orphans, UTXO undo symmetry.
 - Property tests optional (`proptest`) for invariants.
-- Mainnet block replay deferred to M8.
+- Mainnet block replay and legacy known vectors (M8).
 
 ## Documentation
 

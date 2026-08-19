@@ -110,15 +110,34 @@ bitrst node --listen 127.0.0.1:8333 --network testnet
 - M6 Wallet: secp256k1 key generation, Base58Check P2PKH addresses, P2PKH signing, and active-chain UTXO tracking
 - M7 P2P networking: `bitrst-net` peer manager, handshake, block relay, and CLI `node` command
 - Wallet integration tests for signed local spends and reorg-safe event handling
+- Mainnet genesis block replay and legacy known vectors (M8)
 - CI for tests, clippy, and dependency security (`cargo audit`, `cargo deny`)
 
 ## Testing
+
+Fast workspace suite (short difficulty-adjustment period):
 
 ```bash
 cargo test --all --features test-short-period
 ```
 
 Use `cargo ci-fast` for the same fast test command with locked dependencies. A full mainnet-interval boundary run (`cargo test --all` without features) is slower but supported.
+
+Legacy known vectors and mainnet genesis replay:
+
+```bash
+cargo test --test known_vectors
+cargo test --test mainnet_genesis
+```
+
+Benchmarks (compile-only in CI; run locally for timings):
+
+```bash
+cargo bench --no-run
+cargo bench
+```
+
+See [`docs/benchmarks.md`](docs/benchmarks.md) for filters and a machine-dependent results template.
 
 ## Security
 
@@ -142,3 +161,4 @@ cargo deny check
 7. Script VM (M5): done
 8. Wallet (M6): done
 9. P2P networking (M7): done
+10. Benchmarks, genesis replay, and known vectors (M8): done
