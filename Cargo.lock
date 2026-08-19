@@ -101,6 +101,8 @@ dependencies = [
  "clap",
  "criterion",
  "hex",
+ "secp256k1",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

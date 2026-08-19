@@ -27,7 +27,8 @@ impl FileBlockStore {
     /// Stale `*.tmp` residue from interrupted writes is removed on open.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, StoreError> {
         let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root).map_err(|source| StoreError::io("create store directory", source))?;
+        fs::create_dir_all(&root)
+            .map_err(|source| StoreError::io("create store directory", source))?;
         let store = Self { root };
         store.cleanup_temp_files()?;
         Ok(store)
@@ -43,7 +44,8 @@ impl FileBlockStore {
     }
 
     fn temp_path(&self, hash: &[u8; 32]) -> PathBuf {
-        self.root.join(format!("{}.tmp", hash.encode_hex::<String>()))
+        self.root
+            .join(format!("{}.tmp", hash.encode_hex::<String>()))
     }
 
     fn cleanup_temp_files(&self) -> Result<(), StoreError> {
@@ -120,7 +122,7 @@ impl BlockStore for FileBlockStore {
                 StoreError::corrupt("truncated block file")
             }
             DecodeError::LimitExceeded { .. } => StoreError::corrupt("oversized block file"),
-            other => StoreError::corrupt(&format!("malformed block file: {other}")),
+            other => StoreError::corrupt(format!("malformed block file: {other}")),
         })?;
 
         let actual = block.hash();
@@ -209,10 +211,7 @@ mod tests {
     fn missing_block_returns_none() {
         let dir = tempdir().expect("tempdir");
         let store = FileBlockStore::new(store_path(&dir)).expect("open");
-        assert!(store
-            .get_block(&[9u8; 32])
-            .expect("get")
-            .is_none());
+        assert!(store.get_block(&[9u8; 32]).expect("get").is_none());
     }
 
     #[test]

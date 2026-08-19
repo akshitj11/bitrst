@@ -34,6 +34,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 [dev-dependencies]
 bitrst-script = { path = "crates/bitrst-script" }
 criterion = "0.8.2"
+secp256k1 = { version = "0.29", features = ["global-context"] }
+tempfile = "3.27.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "test-util"] }
 
 [[bench]]
