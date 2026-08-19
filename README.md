@@ -5,16 +5,26 @@
 
 Bitcoin from scratch, in Rust.
 
+## Demo
+
+![bitrst mine demo](docs/assets/mine-demo.gif)
+
+Captured from `bitrst mine --count 2 --network-time 1231007105`. Regenerate with `scripts/render-demo.sh` (requires ImageMagick and a built `bitrst` binary).
+
 ## Architecture
 
 ```mermaid
 flowchart TB
   subgraph cli [bitrst CLI]
     Main[src/main.rs]
+    Tip[tip]
+    Mine[mine]
+    Wallet[wallet]
+    NodeCmd[node]
   end
 
   subgraph wallet_layer [bitrst-wallet]
-    Wallet[Wallet + UTXO watch]
+    WalletCore[Wallet + UTXO watch]
     Sign[sign_p2pkh_input]
     Addr[P2PKH Address]
   end
@@ -24,8 +34,13 @@ flowchart TB
     Chain[Chain connect / reorg / orphans]
     Validate[Validate: size PoW Merkle coinbase time bits UTXO script]
     Utxo[UtxoSet]
-    Events[ChainEvent log]
-    Store[BlockStore / MemoryBlockStore]
+    Events[ChainEvent journal + cursor]
+    Mempool[Mempool admission / eviction]
+    MempoolH[MempoolHandle]
+    StoreTrait[BlockStore trait]
+    MemStore[MemoryBlockStore]
+    FileStore[FileBlockStore]
+    DiscJournal[DisconnectedBlockJournal]
   end
 
   subgraph script [bitrst-script]
@@ -37,35 +52,57 @@ flowchart TB
   end
 
   subgraph miner [bitrst-miner]
-    Mine[nonce search]
+    MineCrate[nonce search]
   end
 
   subgraph net [bitrst-net P2P]
-    Net[PeerManager + relay]
+    PM[PeerManager]
+    HS[handshake]
+    Relay[relay: inv / getdata / tx / block]
+    Track[BlockRequestTracker + TxRequestTracker]
   end
 
-  Main --> Handle
-  Main --> Net
-  Wallet --> Sign
-  Wallet --> Handle
+  Main --> Tip
+  Main --> Mine
+  Main --> Wallet
+  Main --> NodeCmd
+  Tip --> Handle
+  Mine --> Handle
+  Mine --> MineCrate
+  Wallet --> WalletCore
+  WalletCore --> Sign
+  WalletCore --> Handle
   Sign --> Hash
   Sign --> VM
   Addr --> Hash
+  NodeCmd --> PM
   Handle --> Chain
   Chain --> Validate
   Validate --> Utxo
   Validate --> VM
   Validate --> Hash
   Chain --> Events
-  Chain --> Store
+  Chain --> StoreTrait
+  Chain --> DiscJournal
+  StoreTrait --> MemStore
+  StoreTrait --> FileStore
+  MempoolH --> Mempool
+  Mempool --> Validate
+  Mempool --> Utxo
+  Mempool --> Events
+  Mempool --> DiscJournal
   VM --> Hash
-  Mine --> Chain
-  Net --> Handle
+  MineCrate --> Chain
+  PM --> HS
+  PM --> Relay
+  PM --> Handle
+  PM --> MempoolH
+  Relay --> Track
+  Relay --> Handle
+  Relay --> MempoolH
 ```
 
-![bitrst architecture](docs/architecture-diagram.mersketch.svg)
-
-Diagram source: [`docs/architecture-diagram.mmd`](docs/architecture-diagram.mmd) · Made with [Mersketch](https://github.com/akshitj11/Mersketch)
+Diagram source: [`docs/architecture-diagram.mmd`](docs/architecture-diagram.mmd). Full write-up: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## CLI
 
@@ -78,16 +115,16 @@ The `bitrst` binary exposes ephemeral (in-memory) commands:
 | `wallet new` | Generate a P2PKH address (secrets hidden by default) |
 | `wallet address` | Derive an address from a private key (`--private-key-stdin`, `BITRST_PRIVATE_KEY`, or `--private-key`) |
 | `wallet balance` | Report balance for an address on a genesis-only chain |
-| `node` | Run a P2P node via `PeerManager` (Ctrl-C / SIGTERM shutdown) |
+| `node` | Run a P2P node via `PeerManager` with shared mempool (Ctrl-C / SIGTERM shutdown) |
 
-Chain and wallet state is not persisted to disk yet; commands print an explicit notice.
+CLI chain and wallet state is in-memory only. Commands print an explicit notice. `FileBlockStore` provides atomic on-disk block persistence for library callers; the CLI does not use it yet.
 
 ```bash
 bitrst tip
-bitrst mine --count 2 --network-time 1231006505
+bitrst mine --count 2 --network-time 1231007105
 bitrst wallet new
 bitrst wallet address --private-key-stdin   # hex on stdin
-bitrst wallet balance --address <addr> --network-time 1231006505
+bitrst wallet balance --address <addr> --network-time 1231007105
 bitrst node --listen 127.0.0.1:8333 --network testnet
 ```
 
@@ -108,10 +145,28 @@ bitrst node --listen 127.0.0.1:8333 --network testnet
 - Universal-guide chain consensus integration tests (reorg safety, orphans, difficulty, validation, events)
 - M5 Script VM: P2PKH script verification, legacy sighash, `bitrst-script` stack interpreter
 - M6 Wallet: secp256k1 key generation, Base58Check P2PKH addresses, P2PKH signing, and active-chain UTXO tracking
-- M7 P2P networking: `bitrst-net` peer manager, handshake, block relay, and CLI `node` command
-- Wallet integration tests for signed local spends and reorg-safe event handling
-- Mainnet genesis block replay and legacy known vectors (M8)
+- M7 P2P networking: `bitrst-net` peer manager, handshake, block and transaction relay, and CLI `node` command
+- M8 Benchmarks, genesis replay, and known vectors
+- `FileBlockStore`: atomic one-file-per-hash disk persistence
+- Bounded mempool with fee-rate eviction, reorg sync, and P2P relay integration
 - CI for tests, clippy, and dependency security (`cargo audit`, `cargo deny`)
+
+## Docs and progress
+
+- Architecture: [`ARCHITECTURE.md`](ARCHITECTURE.md)
+- Devlog: [`devlog/2026-W34.md`](devlog/2026-W34.md)
+- Machine-readable stats: [`docs/progress.json`](docs/progress.json)
+- Validate docs locally: `scripts/validate-docs.sh`
+
+### mdBook (optional)
+
+Install [mdBook](https://rust-lang.github.io/mdBook/) locally, then from the repo root:
+
+```bash
+mdbook build
+```
+
+Output lands in `book/`. mdBook is not required for CI; the repository docs work as plain Markdown without it.
 
 ## Testing
 
@@ -162,3 +217,5 @@ cargo deny check
 8. Wallet (M6): done
 9. P2P networking (M7): done
 10. Benchmarks, genesis replay, and known vectors (M8): done
+11. FileBlockStore and mempool relay (M8.1–M8.2): done
+12. CLI persistent chain, addrman, headers-first sync: planned
