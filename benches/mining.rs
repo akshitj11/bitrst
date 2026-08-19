@@ -53,7 +53,7 @@ fn bench_easy_target_nonce_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("bounded_nonce_search");
     group.bench_function("easy_target_until_solution", |bencher| {
         bencher.iter_batched(
-            || search_template_header(),
+            search_template_header,
             |mut header| {
                 let mut attempts = 0u32;
                 loop {
