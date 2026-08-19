@@ -177,6 +177,21 @@ impl Mempool {
         self.entries.contains_key(txid)
     }
 
+    /// Returns whether `tx` would validate against the current chain and pool view.
+    pub fn is_valid_tx(&self, tx: &Transaction, chain_utxo: &UtxoSet) -> bool {
+        let txid = tx.txid();
+        let mut view = chain_utxo.clone();
+        let mut ordered: Vec<&MempoolEntry> = self.entries.values().collect();
+        ordered.sort_by_key(|entry| entry.seq);
+        for entry in ordered {
+            if entry.tx.txid() == txid {
+                continue;
+            }
+            view.apply_transaction(&entry.tx);
+        }
+        is_valid_for_view(tx, &view)
+    }
+
     /// Returns a cloned transaction when `txid` is in the pool.
     pub fn get_transaction(&self, txid: &[u8; 32]) -> Option<Transaction> {
         self.entries.get(txid).map(|entry| entry.tx.clone())
@@ -252,7 +267,16 @@ impl Mempool {
         self.restore_candidates(restore_candidates, chain_utxo);
     }
 
-    /// Applies a caller-supplied chain event slice against the final active-chain UTXO.
+    /// Reconciles the pool with the active chain when incremental event replay is unavailable.
+    pub fn resync_to_active_chain(&mut self, chain: &Chain) {
+        for height in 0..=chain.height() {
+            if let Some(block) = chain.active_block_at(height) {
+                self.remove_for_block(block);
+            }
+        }
+        self.revalidate_pool(chain.utxo());
+    }
+
     ///
     /// Events are not consumed from the chain; the caller must pass the slice explicitly.
     pub fn apply_chain_events(&mut self, events: &[ChainEvent], chain: &Chain) {
@@ -414,7 +438,7 @@ impl Mempool {
                 return Err(MempoolError::AtCapacity);
             }
 
-            self.remove_entry(&victim);
+            self.remove_entry_and_descendants(&victim);
         }
         Ok(())
     }
@@ -472,6 +496,27 @@ impl Mempool {
         };
         self.total_bytes -= entry.size;
         self.spends.retain(|_, owner| owner != txid);
+    }
+
+    fn descendants_of(&self, root: &[u8; 32]) -> HashSet<[u8; 32]> {
+        let mut descendants = HashSet::new();
+        let mut stack = vec![*root];
+        while let Some(current) = stack.pop() {
+            for (outpoint, owner) in &self.spends {
+                if outpoint.txid == current && descendants.insert(*owner) {
+                    stack.push(*owner);
+                }
+            }
+        }
+        descendants
+    }
+
+    fn remove_entry_and_descendants(&mut self, txid: &[u8; 32]) {
+        let mut remove = self.descendants_of(txid);
+        remove.insert(*txid);
+        for id in remove {
+            self.remove_entry(&id);
+        }
     }
 }
 
@@ -967,7 +1012,59 @@ mod tests {
     }
 
     #[test]
-    fn reorg_restores_valid_tx_and_evicts_stale_invalid_entries() {
+    fn evicting_parent_removes_descendants_and_frees_capacity() {
+        let (chain, lock_script, funding_txid) = funded_chain_with_two_p2pkh_outputs();
+        let tx_a = sign_p2pkh_spend(funding_txid, 0, &lock_script, 25_0000_0000, 1);
+        let tx_a_id = tx_a.txid();
+        let tx_b = sign_p2pkh_spend_from_output(tx_a_id, 0, &[], 24_0000_0000, 23_0000_0000);
+        let tx_b_id = tx_b.txid();
+
+        let limits = MempoolLimits {
+            max_tx_count: 2,
+            max_bytes: usize::MAX,
+        };
+        let mut pool = Mempool::new(limits);
+        pool.accept_tx(tx_a, chain.utxo()).expect("accept a");
+        pool.accept_tx(tx_b, chain.utxo()).expect("accept b");
+        assert!(pool.contains(&tx_b_id));
+
+        let tx_c = sign_p2pkh_spend(funding_txid, 1, &lock_script, 25_0000_0000, 5_0000_0000);
+        pool.accept_tx(tx_c, chain.utxo()).expect("accept c");
+
+        assert!(!pool.contains(&tx_a_id));
+        assert!(!pool.contains(&tx_b_id));
+        assert!(pool.get_transaction(&tx_b_id).is_none());
+    }
+
+    #[test]
+    fn resync_removes_confirmed_active_chain_transactions() {
+        let (mut chain, lock_script, funding_txid) = funded_chain_with_p2pkh();
+        let fund_parent = chain.active_block_at(1).expect("fund block").clone();
+
+        let spend = sign_p2pkh_spend(funding_txid, 0, &lock_script, 25_0000_0000, 1_0000_0000);
+        let spend_txid = spend.txid();
+
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.accept_tx(spend.clone(), chain.utxo()).expect("accept");
+
+        let mut block_with_spend = mine_block_on(&fund_parent, NETWORK_TIME + 300, 2);
+        block_with_spend.transactions.push(spend);
+        block_with_spend.header.merkle_root = block_with_spend.merkle_root().expect("merkle");
+        let target = Target::from_bits(TEST_BITS).expect("bits");
+        while !target.meets(&block_with_spend.header.hash()) {
+            block_with_spend.header.nonce = block_with_spend.header.nonce.wrapping_add(1);
+        }
+        chain
+            .connect_block(block_with_spend)
+            .expect("confirm spend");
+
+        assert!(pool.contains(&spend_txid));
+        pool.resync_to_active_chain(&chain);
+        assert!(!pool.contains(&spend_txid));
+    }
+
+    #[test]
+    fn reorg_restores_disconnected_valid_tx() {
         let (mut chain, lock_script, funding_txid) = funded_chain_with_p2pkh();
         let fund_parent = chain.active_block_at(1).expect("fund block").clone();
 
@@ -994,10 +1091,6 @@ mod tests {
         );
         assert!(!pool.contains(&spend_txid));
 
-        let stale_conflict =
-            sign_p2pkh_spend(funding_txid, 0, &lock_script, 25_0000_0000, 2_0000_0000);
-        let _ = pool.accept_tx(stale_conflict, chain.utxo());
-
         let alt_b2 = mine_block_on(&fund_parent, NETWORK_TIME + 500, 2);
         let alt_b3 = mine_block_on(&alt_b2, NETWORK_TIME + 600, 3);
         chain.connect_block(alt_b2).expect("alt b2");
@@ -1005,19 +1098,58 @@ mod tests {
         let result = chain.connect_block(alt_b3).expect("reorg");
         assert!(matches!(result, ConnectResult::Reorganized { .. }));
 
-        let events = chain.take_events();
-        pool.apply_chain_events(&events, &chain);
+        pool.apply_chain_events(&chain.take_events(), &chain);
 
         assert!(
             pool.contains(&spend_txid),
             "disconnected block tx should be restored when valid"
         );
+        assert!(pool.is_valid_tx(&spend, chain.utxo()));
+    }
+
+    #[test]
+    fn reorg_evicts_stale_invalid_entries_using_validation_view() {
+        let (mut chain, lock_script, funding_txid) = funded_chain_with_p2pkh();
+        let fund_parent = chain.active_block_at(1).expect("fund block").clone();
+
+        let spend = sign_p2pkh_spend(funding_txid, 0, &lock_script, 25_0000_0000, 1_0000_0000);
+        let spend_txid = spend.txid();
+
+        let mut pool = Mempool::new(MempoolLimits::default());
+        pool.accept_tx(spend.clone(), chain.utxo()).expect("accept");
+
+        let mut block_with_spend = mine_block_on(&fund_parent, NETWORK_TIME + 300, 2);
+        block_with_spend.transactions.push(spend.clone());
+        block_with_spend.header.merkle_root = block_with_spend.merkle_root().expect("merkle");
+        let target = Target::from_bits(TEST_BITS).expect("bits");
+        while !target.meets(&block_with_spend.header.hash()) {
+            block_with_spend.header.nonce = block_with_spend.header.nonce.wrapping_add(1);
+        }
+        chain
+            .connect_block(block_with_spend)
+            .expect("confirm spend");
+        pool.synchronize_to_chain(
+            chain.utxo(),
+            &[chain.active_block_at(2).expect("b2").clone()],
+            &[],
+        );
+
+        let alt_b2 = mine_block_on(&fund_parent, NETWORK_TIME + 500, 2);
+        let alt_b3 = mine_block_on(&alt_b2, NETWORK_TIME + 600, 3);
+        chain.connect_block(alt_b2).expect("alt b2");
+        chain.take_events();
+        chain.connect_block(alt_b3).expect("reorg");
+
+        pool.apply_chain_events(&chain.take_events(), &chain);
+
+        let mut invalid = spend.clone();
+        invalid.inputs[0].script_sig = vec![0x01];
+        assert!(!pool.is_valid_tx(&invalid, chain.utxo()));
+        assert!(!pool.contains(&invalid.txid()));
         for txid in pool.txids() {
             let tx = pool.get_transaction(&txid).expect("tx");
-            assert!(
-                pool.accept_tx(tx, chain.utxo()).is_err(),
-                "pool must not retain invalid entries"
-            );
+            assert!(pool.is_valid_tx(&tx, chain.utxo()));
         }
+        assert!(pool.contains(&spend_txid));
     }
 }

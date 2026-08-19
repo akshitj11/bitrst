@@ -95,6 +95,12 @@ impl MempoolHandle {
         Ok(())
     }
 
+    /// Reconciles the pool with the active chain when event replay is unavailable.
+    pub fn resync_to_active_chain(&self, chain: &Chain) -> Result<(), MempoolHandleError> {
+        self.write()?.resync_to_active_chain(chain);
+        Ok(())
+    }
+
     fn read(&self) -> Result<RwLockReadGuard<'_, Mempool>, MempoolHandleError> {
         self.inner
             .read()
