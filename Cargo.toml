@@ -33,4 +33,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 
 [dev-dependencies]
 bitrst-script = { path = "crates/bitrst-script" }
+criterion = "0.8.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net", "test-util"] }
+
+[[bench]]
+name = "hashing"
+harness = false
+
+[[bench]]
+name = "mining"
+harness = false
