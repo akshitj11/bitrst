@@ -30,3 +30,9 @@ pub const MAX_SCRIPT_SIZE: usize = 10_000;
 
 /// Maximum satoshis per output (21M BTC).
 pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
+
+/// Default maximum transactions held in the mempool.
+pub const DEFAULT_MAX_MEMPOOL_TX_COUNT: usize = 5_000;
+
+/// Default maximum total serialized bytes held in the mempool.
+pub const DEFAULT_MAX_MEMPOOL_BYTES: usize = 300_000_000;
