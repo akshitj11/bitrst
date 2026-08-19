@@ -10,6 +10,8 @@ use bitrst_net::framing::{read_message, write_message};
 use bitrst_net::handshake::{ConnectionDirection, HandshakeConfig};
 use bitrst_net::message::{InvType, InventoryVector, Message, MessagePayload};
 use bitrst_net::peer::{spawn_peer, PeerCommand, PeerContext};
+use bitrst_net::peers::{PeerManager, PeerManagerConfig};
+use bitrst_net::seeds::SeedStrategy;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -523,8 +525,82 @@ async fn conflicting_tx_inv_is_not_admitted_to_mempool() {
     server_handle.abort();
 }
 
-fn funded_p2pkh_spend(chain: &ChainHandle) -> (bitrst_core::Transaction, [u8; 32]) {
-    funded_p2pkh_spend_on(chain, &genesis_block())
+#[tokio::test]
+async fn tx_inventory_fans_out_to_second_peer() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+
+    let genesis = genesis_block();
+    let chain = ChainHandle::new_genesis(genesis.clone(), NETWORK_TIME).expect("genesis");
+    let mempool = MempoolHandle::new();
+    let (spend, txid) = funded_p2pkh_spend_on(&chain, &genesis);
+
+    let mut manager = PeerManager::new(
+        chain,
+        mempool,
+        PeerManagerConfig {
+            network: Network::Testnet,
+            listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            max_inbound: 4,
+            max_outbound: 4,
+            seeds: SeedStrategy::localhost(port.saturating_add(1)),
+        },
+    );
+    manager.start_listener().await.expect("listen");
+    manager.spawn_acceptor();
+
+    sleep(Duration::from_millis(50)).await;
+
+    let mut origin = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .expect("connect origin");
+    client_handshake(&mut origin, 901).await;
+
+    let mut relay_peer = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+        .await
+        .expect("connect relay");
+    client_handshake(&mut relay_peer, 902).await;
+
+    manager
+        .drive_until(
+            |manager| manager.ready_peer_count() >= 2,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("drive");
+
+    write_message(&mut origin, Network::Testnet, &Message::tx(spend))
+        .await
+        .expect("write tx");
+
+    for _ in 0..40 {
+        manager.poll().await.expect("poll");
+        if let Ok(Ok(message)) = tokio::time::timeout(
+            Duration::from_millis(50),
+            read_message(&mut relay_peer, Network::Testnet),
+        )
+        .await
+        {
+            if message.command == "inv" {
+                match message.payload {
+                    MessagePayload::Inv(items) => {
+                        assert!(items.iter().any(|item| {
+                            item.inv_type == InvType::Transaction && item.hash == txid
+                        }));
+                        assert_eq!(
+                            decode_inv(&encode_inv(&items).expect("encode")).expect("decode"),
+                            items
+                        );
+                        return;
+                    }
+                    other => panic!("expected inv payload, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    panic!("relay peer did not receive transaction inv");
 }
 
 fn funded_p2pkh_spend_on(
