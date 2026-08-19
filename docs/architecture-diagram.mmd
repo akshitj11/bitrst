@@ -1,10 +1,14 @@
 flowchart TB
   subgraph cli [bitrst CLI]
     Main[src/main.rs]
+    Tip[tip]
+    Mine[mine]
+    Wallet[wallet]
+    NodeCmd[node]
   end
 
   subgraph wallet_layer [bitrst-wallet]
-    Wallet[Wallet + UTXO watch]
+    WalletCore[Wallet + UTXO watch]
     Sign[sign_p2pkh_input]
     Addr[P2PKH Address]
   end
@@ -14,8 +18,13 @@ flowchart TB
     Chain[Chain connect / reorg / orphans]
     Validate[Validate: size PoW Merkle coinbase time bits UTXO script]
     Utxo[UtxoSet]
-    Events[ChainEvent log]
-    Store[BlockStore / MemoryBlockStore]
+  Events[ChainEvent journal + cursor]
+    Mempool[Mempool admission / eviction]
+    MempoolH[MempoolHandle]
+    StoreTrait[BlockStore trait]
+    MemStore[MemoryBlockStore]
+    FileStore[FileBlockStore]
+    DiscJournal[DisconnectedBlockJournal]
   end
 
   subgraph script [bitrst-script]
@@ -27,26 +36,51 @@ flowchart TB
   end
 
   subgraph miner [bitrst-miner]
-    Mine[nonce search]
+    MineCrate[nonce search]
   end
 
-  subgraph future [planned M7]
-    Net[bitrst-net P2P]
+  subgraph net [bitrst-net P2P]
+    PM[PeerManager]
+    HS[handshake]
+    Relay[relay: inv / getdata / tx / block]
+    Track[BlockRequestTracker + TxRequestTracker]
   end
 
-  Main --> Handle
-  Wallet --> Sign
-  Wallet --> Handle
+  Main --> Tip
+  Main --> Mine
+  Main --> Wallet
+  Main --> NodeCmd
+  Tip --> Handle
+  Mine --> Handle
+  Mine --> MineCrate
+  Wallet --> WalletCore
+  WalletCore --> Sign
+  WalletCore --> Handle
   Sign --> Hash
   Sign --> VM
   Addr --> Hash
+  NodeCmd --> PM
   Handle --> Chain
   Chain --> Validate
   Validate --> Utxo
   Validate --> VM
   Validate --> Hash
   Chain --> Events
-  Chain --> Store
+  Chain --> StoreTrait
+  Chain --> DiscJournal
+  StoreTrait --> MemStore
+  StoreTrait --> FileStore
+  MempoolH --> Mempool
+  Mempool --> Validate
+  Mempool --> Utxo
+  Mempool --> Events
+  Mempool --> DiscJournal
   VM --> Hash
-  Mine --> Chain
-  Net -.-> Handle
+  MineCrate --> Chain
+  PM --> HS
+  PM --> Relay
+  PM --> Handle
+  PM --> MempoolH
+  Relay --> Track
+  Relay --> Handle
+  Relay --> MempoolH
