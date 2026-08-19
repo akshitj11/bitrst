@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use bitrst_core::{Block, BlockHeader, ChainHandle, Target};
+use bitrst_core::{Block, BlockHeader, ChainHandle, MempoolHandle, Target};
 use bitrst_net::codec::{decode_inv, encode_getdata, encode_inv};
 use bitrst_net::constants::{Network, MAX_PEER_EVENTS};
 use bitrst_net::envelope::MessageHeader;
@@ -158,6 +158,7 @@ async fn two_node_block_relay_updates_follower_chain() {
                 ConnectionDirection::Inbound,
                 Network::Testnet,
                 leader_chain,
+                MempoolHandle::new(),
                 HandshakeConfig {
                     local_nonce: 100,
                     timeout: Duration::from_secs(5),
@@ -179,6 +180,7 @@ async fn two_node_block_relay_updates_follower_chain() {
             ConnectionDirection::Outbound,
             Network::Testnet,
             follower_chain.clone(),
+            MempoolHandle::new(),
             HandshakeConfig {
                 local_nonce: 200,
                 timeout: Duration::from_secs(5),
@@ -239,6 +241,7 @@ async fn inv_getdata_block_wire_flow_updates_server_chain() {
                 ConnectionDirection::Inbound,
                 Network::Testnet,
                 server_chain,
+                MempoolHandle::new(),
                 HandshakeConfig {
                     local_nonce: 301,
                     timeout: Duration::from_secs(5),
@@ -356,4 +359,225 @@ async fn inv_wire_payload_matches_codec_bytes() {
         }
         other => panic!("expected inv payload, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn tx_inv_getdata_wire_flow_admits_to_follower_mempool() {
+    use bitrst_core::MempoolHandle;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let genesis = genesis_block();
+    let server_chain = ChainHandle::new_genesis(genesis.clone(), NETWORK_TIME).expect("genesis");
+    let server_mempool = MempoolHandle::new();
+    let server_mempool_check = server_mempool.clone();
+    let (spend, txid) = funded_p2pkh_spend_on(&server_chain, &genesis);
+
+    let (server_event_tx, mut server_events) = mpsc::channel(MAX_PEER_EVENTS);
+    let server = tokio::spawn(async move {
+        let (stream, peer_addr) = listener.accept().await.expect("accept");
+        let (cmd_tx, handle) = spawn_peer(
+            stream,
+            PeerContext::new(
+                peer_addr,
+                ConnectionDirection::Inbound,
+                Network::Testnet,
+                server_chain,
+                server_mempool,
+                HandshakeConfig {
+                    local_nonce: 501,
+                    timeout: Duration::from_secs(5),
+                },
+                1,
+                server_event_tx,
+            ),
+        );
+        (cmd_tx, handle)
+    });
+
+    sleep(Duration::from_millis(50)).await;
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    client_handshake(&mut client, 601).await;
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_events.recv())
+        .await
+        .expect("server handshake timeout");
+
+    let (server_cmd, server_handle) = server.await.expect("server");
+
+    write_message(
+        &mut client,
+        Network::Testnet,
+        &Message::inv(vec![InventoryVector {
+            inv_type: InvType::Transaction,
+            hash: txid,
+        }]),
+    )
+    .await
+    .expect("write inv");
+
+    let getdata_message = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_message(&mut client, Network::Testnet),
+    )
+    .await
+    .expect("getdata timeout")
+    .expect("read getdata");
+    assert_eq!(getdata_message.command, "getdata");
+
+    write_message(&mut client, Network::Testnet, &Message::tx(spend))
+        .await
+        .expect("write tx");
+
+    for _ in 0..40 {
+        if server_mempool_check.contains(&txid).unwrap_or(false) {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(server_mempool_check.contains(&txid).expect("contains"));
+    let _ = server_cmd.send(PeerCommand::Shutdown).await;
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn conflicting_tx_inv_is_not_admitted_to_mempool() {
+    use bitrst_core::MempoolHandle;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let genesis = genesis_block();
+    let server_chain = ChainHandle::new_genesis(genesis.clone(), NETWORK_TIME).expect("genesis");
+    let server_mempool = MempoolHandle::new();
+    let server_mempool_check = server_mempool.clone();
+    let (mut spend, txid) = funded_p2pkh_spend_on(&server_chain, &genesis);
+    server_chain
+        .with_chain(|chain| server_mempool.accept_tx(spend.clone(), chain.utxo()))
+        .expect("chain")
+        .expect("resident");
+    assert!(server_mempool_check.contains(&txid).expect("seeded"));
+
+    let (server_event_tx, mut server_events) = mpsc::channel(MAX_PEER_EVENTS);
+    let server = tokio::spawn(async move {
+        let (stream, peer_addr) = listener.accept().await.expect("accept");
+        let (cmd_tx, handle) = spawn_peer(
+            stream,
+            PeerContext::new(
+                peer_addr,
+                ConnectionDirection::Inbound,
+                Network::Testnet,
+                server_chain,
+                server_mempool,
+                HandshakeConfig {
+                    local_nonce: 701,
+                    timeout: Duration::from_secs(5),
+                },
+                1,
+                server_event_tx,
+            ),
+        );
+        (cmd_tx, handle)
+    });
+
+    sleep(Duration::from_millis(50)).await;
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    client_handshake(&mut client, 801).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), server_events.recv())
+        .await
+        .expect("server handshake timeout");
+
+    let (server_cmd, server_handle) = server.await.expect("server");
+
+    spend.inputs[0].script_sig = vec![0x01];
+    write_message(
+        &mut client,
+        Network::Testnet,
+        &Message::inv(vec![InventoryVector {
+            inv_type: InvType::Transaction,
+            hash: spend.txid(),
+        }]),
+    )
+    .await
+    .expect("write inv");
+
+    let getdata_message = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_message(&mut client, Network::Testnet),
+    )
+    .await
+    .expect("getdata timeout")
+    .expect("read getdata");
+    assert_eq!(getdata_message.command, "getdata");
+
+    write_message(&mut client, Network::Testnet, &Message::tx(spend))
+        .await
+        .expect("write tx");
+
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(server_mempool_check.len().expect("len"), 1);
+    assert!(server_mempool_check.contains(&txid).expect("original"));
+    let _ = server_cmd.send(PeerCommand::Shutdown).await;
+    server_handle.abort();
+}
+
+fn funded_p2pkh_spend(chain: &ChainHandle) -> (bitrst_core::Transaction, [u8; 32]) {
+    funded_p2pkh_spend_on(chain, &genesis_block())
+}
+
+fn funded_p2pkh_spend_on(
+    chain: &ChainHandle,
+    genesis: &Block,
+) -> (bitrst_core::Transaction, [u8; 32]) {
+    use bitrst_core::{Transaction, TxInput, TxOutput};
+    use bitrst_crypto::hash160::hash160;
+    use bitrst_script::{p2pkh_script_pubkey, p2pkh_script_sig};
+    use secp256k1::{Message, Secp256k1, SecretKey};
+
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(&[0x44; 32]).expect("secret");
+    let pk = secp256k1::PublicKey::from_secret_key(&secp, &sk);
+    let pubkey_bytes = pk.serialize();
+    let lock_script = p2pkh_script_pubkey(&hash160(&pubkey_bytes));
+
+    let mut fund_block = child_block(genesis);
+    fund_block.transactions[0].outputs[0].script_pubkey = lock_script.clone();
+    fund_block.header.merkle_root = fund_block.merkle_root().expect("merkle");
+    let target = Target::from_bits(TEST_BITS).expect("bits");
+    while !target.meets(&fund_block.header.hash()) {
+        fund_block.header.nonce = fund_block.header.nonce.wrapping_add(1);
+    }
+    chain.connect_block(fund_block).expect("fund");
+    let funding_txid = chain
+        .get_block(&chain.tip_hash().expect("tip"))
+        .expect("get")
+        .expect("block")
+        .transactions[0]
+        .txid();
+
+    let mut spend = Transaction {
+        version: 1,
+        inputs: vec![TxInput {
+            previous_output: funding_txid,
+            index: 0,
+            script_sig: Vec::new(),
+            sequence: u32::MAX,
+        }],
+        outputs: vec![TxOutput {
+            value: 49_0000_0000,
+            script_pubkey: Vec::new(),
+        }],
+        lock_time: 0,
+    };
+    let prev_scripts = vec![lock_script];
+    let sighash = bitrst_core::sighash_all(&spend, 0, &prev_scripts).expect("sighash");
+    let sig = secp.sign_ecdsa(&Message::from_digest(sighash), &sk);
+    let mut sig_bytes = sig.serialize_der().to_vec();
+    sig_bytes.push(0x01);
+    spend.inputs[0].script_sig = p2pkh_script_sig(&sig_bytes, &pubkey_bytes);
+
+    let spend_txid = spend.txid();
+    (spend, spend_txid)
 }

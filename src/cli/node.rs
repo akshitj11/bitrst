@@ -4,6 +4,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use bitrst_core::MempoolHandle;
 use bitrst_net::constants::{DEFAULT_MAX_INBOUND, DEFAULT_MAX_OUTBOUND};
 use bitrst_net::{PeerManager, PeerManagerConfig, SeedStrategy};
 use clap::Args;
@@ -116,7 +117,8 @@ pub async fn run_with_chain(
         seeds: config.seed_strategy,
     };
 
-    let mut manager = PeerManager::new(chain, peer_config);
+    let mempool = MempoolHandle::new();
+    let mut manager = PeerManager::new(chain, mempool, peer_config);
     manager.start_listener().await?;
     let listen = manager
         .listen_addr()

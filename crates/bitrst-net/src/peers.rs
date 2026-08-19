@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bitrst_core::ChainHandle;
+use bitrst_core::{ChainHandle, MempoolHandle};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -107,6 +107,7 @@ fn format_seed_failures(failures: &[(SocketAddr, NetError)]) -> String {
 /// Manages peer connections and relays inventory announcements.
 pub struct PeerManager {
     chain: ChainHandle,
+    mempool: MempoolHandle,
     config: PeerManagerConfig,
     outbound_count: usize,
     peers: HashMap<SocketAddr, PeerEntry>,
@@ -126,13 +127,14 @@ pub struct PeerManager {
 impl PeerManager {
     /// Creates a peer manager bound to `config` and sharing `chain`.
     #[must_use]
-    pub fn new(chain: ChainHandle, config: PeerManagerConfig) -> Self {
+    pub fn new(chain: ChainHandle, mempool: MempoolHandle, config: PeerManagerConfig) -> Self {
         let (event_tx, event_rx) = mpsc::channel(MAX_PEER_EVENTS);
         let (register_tx, register_rx) = mpsc::channel(MAX_PEER_REGISTRATIONS);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let inbound_capacity = InboundCapacity::new(config.max_inbound);
         Self {
             chain,
+            mempool,
             config,
             outbound_count: 0,
             peers: HashMap::new(),
@@ -178,6 +180,7 @@ impl PeerManager {
         let event_tx = self.event_tx.clone();
         let register_tx = self.register_tx.clone();
         let chain = self.chain.clone();
+        let mempool = self.mempool.clone();
         let network = self.config.network;
         let inbound_capacity = Arc::clone(&self.inbound_capacity);
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -211,6 +214,7 @@ impl PeerManager {
                         ConnectionDirection::Inbound,
                         network,
                         chain.clone(),
+                        mempool.clone(),
                         config,
                         height,
                         event_tx.clone(),
@@ -256,6 +260,7 @@ impl PeerManager {
                 ConnectionDirection::Outbound,
                 self.config.network,
                 self.chain.clone(),
+                self.mempool.clone(),
                 config,
                 height,
                 self.event_tx.clone(),
@@ -378,7 +383,7 @@ impl PeerManager {
             PeerEvent::Announce { addr, items } => {
                 let filtered: Vec<_> = items
                     .into_iter()
-                    .filter(|item| item.inv_type == InvType::Block)
+                    .filter(|item| matches!(item.inv_type, InvType::Block | InvType::Transaction))
                     .collect();
                 self.relay_inventory(Some(addr), filtered).await?;
             }
@@ -511,7 +516,7 @@ impl Drop for PeerManager {
 mod tests {
     use std::time::Duration;
 
-    use bitrst_core::ChainHandle;
+    use bitrst_core::{ChainHandle, MempoolHandle};
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
     use tokio::time::sleep;
@@ -544,6 +549,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain.clone(),
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
@@ -567,6 +573,7 @@ mod tests {
                 ConnectionDirection::Outbound,
                 Network::Testnet,
                 chain,
+                MempoolHandle::new(),
                 HandshakeConfig {
                     local_nonce: 99,
                     timeout: Duration::from_secs(5),
@@ -599,6 +606,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain,
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
@@ -663,6 +671,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain,
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
@@ -763,6 +772,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain,
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: "127.0.0.1:0".parse().expect("addr"),
@@ -782,6 +792,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain,
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: "127.0.0.1:0".parse().expect("addr"),
@@ -802,6 +813,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain,
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: "127.0.0.1:0".parse().expect("addr"),
@@ -824,6 +836,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain,
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: "127.0.0.1:0".parse().expect("addr"),
@@ -852,6 +865,7 @@ mod tests {
         let chain = ChainHandle::new_genesis(genesis_block(), NETWORK_TIME).expect("genesis");
         let mut manager = PeerManager::new(
             chain,
+            MempoolHandle::new(),
             PeerManagerConfig {
                 network: Network::Testnet,
                 listen_addr: format!("127.0.0.1:{port}").parse().expect("addr"),

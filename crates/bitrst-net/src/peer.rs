@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use bitrst_core::ChainHandle;
+use bitrst_core::{ChainHandle, MempoolHandle};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::{timeout_at, Instant};
@@ -15,7 +15,7 @@ use crate::framing::{FramedReader, MessageWriter};
 use crate::handshake::{ConnectionDirection, HandshakeConfig, HandshakePhase, HandshakeState};
 use crate::inbound_capacity::InboundGuard;
 use crate::message::{Message, MessagePayload};
-use crate::relay::{handle_peer_message, BlockRequestTracker, RelayAction};
+use crate::relay::{handle_peer_message, PeerRelayState, RelayAction, RelayError};
 
 /// Configuration and shared handles for a peer connection task.
 #[derive(Debug)]
@@ -28,6 +28,8 @@ pub struct PeerContext {
     pub network: Network,
     /// Shared chain state consulted by relay logic.
     pub chain: ChainHandle,
+    /// Shared mempool consulted for transaction relay.
+    pub mempool: MempoolHandle,
     /// Handshake timing and nonce configuration.
     pub handshake: HandshakeConfig,
     /// Chain height advertised in the local `version` message.
@@ -41,11 +43,13 @@ pub struct PeerContext {
 impl PeerContext {
     /// Creates a peer context for `addr` using default inbound-guard behaviour.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         addr: SocketAddr,
         direction: ConnectionDirection,
         network: Network,
         chain: ChainHandle,
+        mempool: MempoolHandle,
         handshake: HandshakeConfig,
         start_height: i32,
         event_tx: mpsc::Sender<PeerEvent>,
@@ -55,6 +59,7 @@ impl PeerContext {
             direction,
             network,
             chain,
+            mempool,
             handshake,
             start_height,
             event_tx,
@@ -146,6 +151,7 @@ async fn run_peer(
         direction,
         network,
         chain,
+        mempool,
         handshake: handshake_config,
         start_height,
         event_tx,
@@ -154,7 +160,7 @@ async fn run_peer(
     let (mut read_half, write_half) = stream.into_split();
     let (writer, writer_handle) = MessageWriter::spawn(write_half, network, MAX_OUTBOUND_QUEUE);
     let mut framed = FramedReader::new();
-    let mut block_requests = BlockRequestTracker::default();
+    let mut relay = PeerRelayState::with_event_cursor(chain.event_cursor().unwrap_or_default());
 
     let mut handshake = HandshakeState::new(direction, handshake_config.clone());
     let local_version =
@@ -211,17 +217,23 @@ async fn run_peer(
                     }
                     _ => {
                         let chain = chain.clone();
+                        let mempool = mempool.clone();
                         let now = std::time::Instant::now();
-                        let (action, tracker) = tokio::task::spawn_blocking(move || {
-                            let mut tracker = block_requests;
-                            let result =
-                                handle_peer_message(&chain, message, &mut tracker, now);
-                            (result, tracker)
+                        let (action, relay_state) = tokio::task::spawn_blocking(move || {
+                            let mut relay_state = relay;
+                            let result = handle_peer_message(
+                                &chain,
+                                &mempool,
+                                &mut relay_state,
+                                message,
+                                now,
+                            );
+                            (result, relay_state)
                         })
                         .await
                         .map_err(|_| NetError::TaskJoinFailed)?;
-                        block_requests = tracker;
-                        let action = action?;
+                        relay = relay_state;
+                        let action = action.map_err(relay_error_to_net)?;
 
                         match action {
                             RelayAction::None => {}
@@ -261,6 +273,13 @@ async fn emit_event(
     }
 }
 
+fn relay_error_to_net(error: RelayError) -> NetError {
+    match error {
+        RelayError::Chain(chain_error) => chain_error.into(),
+        RelayError::Mempool(_) => NetError::Io("mempool relay"),
+    }
+}
+
 fn unix_timestamp() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -278,7 +297,7 @@ mod tests {
     use crate::handshake::{ConnectionDirection, HandshakeConfig};
     use crate::message::{InvType, InventoryVector, Message};
     use crate::testutil::{child_block, genesis_block, NETWORK_TIME};
-    use bitrst_core::ChainHandle;
+    use bitrst_core::{ChainHandle, MempoolHandle};
     use tokio::net::TcpListener;
     use tokio::sync::{mpsc, Notify};
     use tokio::time::{sleep, Duration};
@@ -299,6 +318,7 @@ mod tests {
             direction,
             Network::Testnet,
             chain,
+            MempoolHandle::new(),
             handshake,
             0,
             event_tx,
