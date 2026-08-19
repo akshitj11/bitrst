@@ -14,6 +14,8 @@ pub mod difficulty;
 pub mod limits;
 /// In-memory transaction pool.
 pub mod mempool;
+/// Thread-safe mempool access.
+pub mod mempool_handle;
 /// Merkle tree helpers for transaction inclusion commitments.
 pub mod merkle;
 /// Proof-of-work target decoding and comparison.
@@ -38,6 +40,7 @@ pub use chain::{block_work, Chain, ChainError, ChainWork, ConnectResult};
 pub use chain_events::{ChainEvent, EvictionReason};
 pub use chain_handle::ChainHandle;
 pub use mempool::{AcceptedTx, Mempool, MempoolError, MempoolLimits};
+pub use mempool_handle::{MempoolHandle, MempoolHandleError};
 pub use merkle::merkle_root;
 pub use pow::Target;
 pub use sighash::{sighash_all, SighashError, SIGHASH_ALL};
