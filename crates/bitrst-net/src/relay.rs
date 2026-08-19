@@ -214,8 +214,9 @@ fn sync_mempool(
             }
         }
         Err(ChainError::EventCursor(_)) => {
+            let since_seq = relay.chain_events.last_seq;
             relay.chain_events = chain.event_cursor()?;
-            match chain.with_chain(|active| mempool.resync_to_active_chain(active)) {
+            match chain.with_chain(|active| mempool.resync_to_active_chain(active, since_seq)) {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(error)) => Err(error.into()),
                 Err(error) => Err(error.into()),
@@ -347,8 +348,12 @@ fn handle_getdata(
                 }
             }
             InvType::Transaction => {
-                if let Ok(Some(tx)) = mempool.get_transaction(&item.hash) {
-                    replies.push(Message::tx(tx));
+                match chain
+                    .with_chain(|active| mempool.serve_transaction(&item.hash, active.utxo()))
+                {
+                    Ok(Ok(Some(tx))) => replies.push(Message::tx(tx)),
+                    Ok(Ok(None)) | Ok(Err(_)) => {}
+                    Err(_) => {}
                 }
             }
             InvType::FilteredBlock => {}
@@ -368,7 +373,7 @@ mod tests {
     use super::{handle_peer_message, BlockRequestTracker, PeerRelayState, TxRequestTracker};
     use crate::message::{InvType, InventoryVector, Message};
     use crate::testutil::{
-        child_block, funded_p2pkh_spend, genesis_block, orphan_block, NETWORK_TIME,
+        child_block, funded_p2pkh_spend, genesis_block, orphan_block, NETWORK_TIME, TEST_BITS,
     };
     use crate::RelayAction;
     use bitrst_core::{ChainHandle, MempoolHandle};
@@ -516,6 +521,48 @@ mod tests {
             }
             other => panic!("expected reply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn getdata_does_not_serve_stale_mempool_transaction() {
+        use bitrst_core::Target;
+
+        let genesis = genesis_block();
+        let chain = ChainHandle::new_genesis(genesis.clone(), NETWORK_TIME).expect("genesis");
+        let mempool = MempoolHandle::new();
+        let mut relay = relay_state(&chain);
+        let (spend, txid) = funded_p2pkh_spend(&chain);
+        chain
+            .with_chain(|active| mempool.accept_tx(spend.clone(), active.utxo()))
+            .expect("chain")
+            .expect("accept");
+
+        let parent = chain
+            .get_block(&chain.tip_hash().expect("tip"))
+            .expect("get")
+            .expect("block");
+        let mut confirm = child_block(&parent, 2, 200);
+        confirm.transactions.push(spend);
+        confirm.header.merkle_root = confirm.merkle_root().expect("merkle");
+        let target = Target::from_bits(TEST_BITS).expect("bits");
+        while !target.meets(&confirm.header.hash()) {
+            confirm.header.nonce = confirm.header.nonce.wrapping_add(1);
+        }
+        chain.connect_block(confirm).expect("confirm");
+
+        let action = handle_peer_message(
+            &chain,
+            &mempool,
+            &mut relay,
+            Message::getdata(vec![InventoryVector {
+                inv_type: InvType::Transaction,
+                hash: txid,
+            }]),
+            now(),
+        )
+        .expect("handle getdata");
+        assert_eq!(action, RelayAction::None);
+        assert!(!mempool.contains(&txid).expect("removed"));
     }
 
     #[test]
