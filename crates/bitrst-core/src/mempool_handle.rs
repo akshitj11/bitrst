@@ -61,6 +61,19 @@ impl MempoolHandle {
         Ok(self.read()?.txids())
     }
 
+    /// Returns true when `txid` is present.
+    pub fn contains(&self, txid: &[u8; 32]) -> Result<bool, MempoolHandleError> {
+        Ok(self.read()?.contains(txid))
+    }
+
+    /// Returns a cloned transaction when `txid` is in the pool.
+    pub fn get_transaction(
+        &self,
+        txid: &[u8; 32],
+    ) -> Result<Option<Transaction>, MempoolHandleError> {
+        Ok(self.read()?.get_transaction(txid))
+    }
+
     /// Validates and admits a transaction against the active chain UTXO set.
     pub fn accept_tx(
         &self,
