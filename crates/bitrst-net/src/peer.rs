@@ -160,7 +160,7 @@ async fn run_peer(
     let (mut read_half, write_half) = stream.into_split();
     let (writer, writer_handle) = MessageWriter::spawn(write_half, network, MAX_OUTBOUND_QUEUE);
     let mut framed = FramedReader::new();
-    let mut relay = PeerRelayState::with_event_cursor(chain.event_cursor().unwrap_or_default());
+    let mut relay = PeerRelayState::with_event_cursor(chain.event_cursor()?);
 
     let mut handshake = HandshakeState::new(direction, handshake_config.clone());
     let local_version =

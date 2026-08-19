@@ -202,13 +202,25 @@ fn sync_mempool(
     mempool: &MempoolHandle,
     relay: &mut PeerRelayState,
 ) -> Result<(), RelayError> {
-    let events = chain.collect_events(&mut relay.chain_events)?;
-    if events.is_empty() {
-        return Ok(());
-    }
-    match chain.with_chain(|active| mempool.apply_chain_events(&events, active)) {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(error.into()),
+    match chain.collect_events(&mut relay.chain_events) {
+        Ok(events) => {
+            if events.is_empty() {
+                return Ok(());
+            }
+            match chain.with_chain(|active| mempool.apply_chain_events(&events, active)) {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(error.into()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        Err(ChainError::EventCursor(_)) => {
+            relay.chain_events = chain.event_cursor()?;
+            match chain.with_chain(|active| mempool.resync_to_active_chain(active)) {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(error.into()),
+                Err(error) => Err(error.into()),
+            }
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -366,9 +378,7 @@ mod tests {
     }
 
     fn relay_state(chain: &ChainHandle) -> PeerRelayState {
-        let mut relay = PeerRelayState::default();
-        relay.chain_events = chain.event_cursor().expect("cursor");
-        relay
+        PeerRelayState::with_event_cursor(chain.event_cursor().expect("cursor"))
     }
 
     #[test]
