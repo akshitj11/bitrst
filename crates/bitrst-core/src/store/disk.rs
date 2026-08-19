@@ -91,12 +91,6 @@ impl BlockStore for FileBlockStore {
         let path = self.block_path(&hash);
         let temp_path = self.temp_path(&hash);
 
-        if let Some(parent) = path.parent() {
-            if parent != self.root.as_path() {
-                return Err(StoreError::InvalidPath);
-            }
-        }
-
         let bytes = block.serialize();
         {
             let mut file = OpenOptions::new()
